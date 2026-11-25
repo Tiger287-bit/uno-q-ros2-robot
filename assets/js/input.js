@@ -22,6 +22,9 @@ const stick = $("stick");
 const knob = $("knob");
 let stickActive = false;
 let activePointer = null;                        // 正在拖摇杆的 pointerId
+// 存的是**物理按键**（w / arrowup / a ...），不是方向名。
+// 以前存方向名：W 与方向键上都映射到 "up"，两个一起按住再松一个，
+// up 就被删掉了 —— 另一个键明明还按着，车却提前停。
 const held = new Set();
 
 /** 该事件是否来自当前拖动中的指针。没有 pointerId 的事件（合成/旧环境）一律放行。 */
@@ -53,7 +56,7 @@ export function renderStick() {
 
 export function renderKeys() {
   document.querySelectorAll(".kbd").forEach((el) => {
-    el.classList.toggle("on", held.has(el.dataset.key));
+    el.classList.toggle("on", activeDirections().has(el.dataset.key));
   });
 }
 
@@ -160,13 +163,25 @@ const KEY_MAP = {
 };
 const ARROW_KEYS = new Set(["arrowup", "arrowdown", "arrowleft", "arrowright"]);
 
+/** 当前生效的方向集合：由按住的物理按键逐个映射后合并。
+ *  这样 W 与 ↑ 同时按住时，松开任意一个，另一个仍在集合里。 */
+function activeDirections() {
+  const dirs = new Set();
+  for (const raw of held) {
+    const dir = KEY_MAP[raw];
+    if (dir) dirs.add(dir);
+  }
+  return dirs;
+}
+
 function syncFromKeys() {
   if (stickActive) return;                    // 拖拽优先，键盘不抢
+  const dirs = activeDirections();
   let x = 0, y = 0;
-  if (held.has("up")) y += 1;
-  if (held.has("down")) y -= 1;
-  if (held.has("left")) x -= 1;
-  if (held.has("right")) x += 1;
+  if (dirs.has("up")) y += 1;
+  if (dirs.has("down")) y -= 1;
+  if (dirs.has("left")) x -= 1;
+  if (dirs.has("right")) x += 1;
   // 斜向（W+A 等）原始模长是 1.41，必须先归一化：否则摇杆球同样会冲出圆环，
   // 且同一个斜向用鼠标推和用键盘按会得到不同的速度（pointToAxes 是归一化的）。
   const len = Math.hypot(x, y);
@@ -186,25 +201,25 @@ function inFormControl(event) {
 }
 
 function onKeyDown(event) {
-  const key = KEY_MAP[event.key.toLowerCase()];
-  if (!key) return;
+  const raw = event.key.toLowerCase();
+  if (!KEY_MAP[raw]) return;
   if (inFormControl(event)) return;
   event.preventDefault();
   if (state.locked) { showLocal("遥控已锁定，请先解除"); return; }
-  if (held.has(key)) return;
-  held.add(key);
+  if (held.has(raw)) return;          // 按住不放的重复 keydown 直接忽略
+  held.add(raw);
   syncFromKeys();
 }
 
 function onKeyUp(event) {
-  const key = KEY_MAP[event.key.toLowerCase()];
-  if (!key) return;
+  const raw = event.key.toLowerCase();
+  if (!KEY_MAP[raw]) return;
   // 收键永远先清状态，不看焦点在哪个控件上：按下 W 后把焦点移到滑块再松手，
   // keyup 的 target 就是 <input>，早先在这里 return 会把 up 永远留在 held 里 ——
   // 车保持全速，之后按 W/S 也不生效（keydown 被拦），只能靠急停。
-  if (!held.has(key)) return;
+  if (!held.has(raw)) return;
   event.preventDefault();
-  held.delete(key);
+  held.delete(raw);
   syncFromKeys();
 }
 
@@ -227,6 +242,10 @@ export function initInput() {
   stick.addEventListener("pointermove", onPointerMove);
   stick.addEventListener("pointerup", endDrag);
   stick.addEventListener("pointercancel", endDrag);
+  // 指针捕获在异常情况下可能直接丢失（触控被系统接管、设备热插拔、浏览器
+  // 切换 Window），此时既没有 pointerup 也没有 pointercancel，摇杆会卡在
+  // 最后一次的偏转上一直操舵。lostpointercapture 是这条路径上唯一的兜底。
+  stick.addEventListener("lostpointercapture", endDrag);
   window.addEventListener("pointerup", endDrag);
 
   document.addEventListener("keydown", onKeyDown);
