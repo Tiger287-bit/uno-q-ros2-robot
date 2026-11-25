@@ -1163,9 +1163,10 @@ void beginRun(int id, int durationMs, RunKind kind, int limit) {
  */
 void resetRunWheels(const uint32_t (&counts)[2]) {
   for (int i = 0; i < 2; ++i) {
-    wheels[i] = {};
+    wheels[i] = {};          // 结构体清零不覆盖文件作用域的增量式状态
     wheels[i].sign = defaultEncoderSigns[i];
     wheels[i].previousCount = counts[i];
+    resetSpeedLoop(i);       // 所以这里必须显式再清一次
   }
 }
 
@@ -1389,7 +1390,10 @@ bool driveSet(int32_t rightCps, int32_t leftCps, bool holdHeading) {
       // 会给出一次反向满占空比冲击；棘轮不清则把换向时的惯性前滚记成"反向位移"。
       if (reversed) {
         heading.mode = HeadingMode::Wheel;
-        wheels[i].pid.reset();
+        // 必须清的是实际参与输出的增量式状态（incErr1/incErr2/incPwmF），
+        // 而不是旧的 SpeedPid 对象 —— 只 reset() 后者等于什么都没做，
+        // 换向后的第一拍仍会带着上一方向的误差与占空比累加值。
+        resetSpeedLoop(i);
         wheels[i].ramp = 0;
         clearSpeedWindow(wheels[i]);   // 换向后窗口里的反向计数不能算进新方向
         wheels[i].position = wheels[i].furthestPosition = 0;
