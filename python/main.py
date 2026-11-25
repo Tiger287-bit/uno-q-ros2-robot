@@ -311,8 +311,15 @@ def control_loop():
                                             allow_pivot=True)
         # 导航指令保持：只在"先前是导航、这一拍突然变 0"时生效。
         # 人手给 0 是明确意图（松杆），绝不能保持，否则松杆后车还往前走。
+        #
+        # 安全前提：急停 / 停车未确认 / 驱动故障这三条必须先于保持生效。
+        # 否则上一拍的非零指令会在 0.45 s 内被重新下发，把急停"顶"回去 ——
+        # 这是保持机制最容易引入的致命回归，必须让安全状态清空保持缓存。
         now_hold = time.monotonic()
-        if right or left:
+        if PAUSED.is_set() or STOP_PENDING.is_set() or drive_fault:
+            nav_hold = (0, 0, False)
+            nav_hold_at = 0.0
+        elif right or left:
             if not manual_command:
                 nav_hold = (right, left, False)
                 nav_hold_at = now_hold
