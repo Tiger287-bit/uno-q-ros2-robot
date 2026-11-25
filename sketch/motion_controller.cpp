@@ -217,13 +217,41 @@ bool driveHoldHeading = false;          // 普通驾驶的直行保向请求。
 // 参照亚博 M1 的 PID_Incre_Calc（Kp 0.8 / Ki 0.06 / Kd 0.5，误差 mm/s、
 // PWM 量程 0~3600）折算：1 mm/s 约 32.4 counts/s，PWM 量程 255/3600。
 // Kd 先取 0：编码器 10 ms 差分噪声大，微分项只会放大量化抖动。
-constexpr float INC_KP = 0.10f;
-constexpr float INC_KI = 0.004f;
-constexpr float INC_KD = 0.0f;
+// 增益不再写死：由在线调参的 Kp/Ki/Kd 折算成增量式系数。
+// 折算系数按"默认值复现原来手调的 0.10 / 0.004 / 0"标定：
+//   speed_kp=2.0  -> tuneValue 20000 -> 20000*5e-6 = 0.10
+//   speed_ki=0.5  -> tuneValue  5000 ->  5000*8e-7 = 0.004
+//   speed_kd=0    ->                    0
+// 这样调参面板改的就是实际参与输出的增益，不会再出现"改了不生效"。
+constexpr float GAIN_KP_SCALE = 5.0e-6f;
+constexpr float GAIN_KI_SCALE = 8.0e-7f;
+constexpr float GAIN_KD_SCALE = 5.0e-6f;
 
 float incErr1[2] = {0.0f, 0.0f};   // e(k-1)
 float incErr2[2] = {0.0f, 0.0f};   // e(k-2)
-int incPwm[2] = {0, 0};            // 增量累加器：上一拍输出
+// 浮点累加器：原来用 int 存上一拍输出、每拍把 delta 取整后累加，
+// 小于 1 码的积分增量会被永久丢掉，低增益时表现为"永远起不来"。
+// 现在只在最终写 PWM 时取整，并把饱和后的实际值回写，避免积分饱和。
+float incPwmF[2] = {0.0f, 0.0f};
+
+/**
+ * @description         : 清空某一轮（或两轮）的速度环动态状态
+ * @param index         : 0/1 指定轮；-1 表示两轮
+ *
+ * 所有停车、故障、复位、重新起转的路径都必须调用它。漏掉一处，残留的
+ * 历史误差和累加器就会让下一次起转带着旧状态，表现为"停一次之后再也走不准"。
+ */
+void resetSpeedLoop(int index) {
+  if (index < 0) {
+    resetSpeedLoop(0);
+    resetSpeedLoop(1);
+    return;
+  }
+  incErr1[index] = 0.0f;
+  incErr2[index] = 0.0f;
+  incPwmF[index] = 0.0f;
+  wheels[index].pid.reset();
+}
 bool pwmReady = false;                 // 四路 PWM 已初始化且未发生写入错误。
 bool workerReady = false;              // 已分配轮速线程栈。
 struct k_mutex stateMutex;             // 串行化 Bridge API 和轮速线程对状态及输出的访问。
@@ -411,6 +439,10 @@ void stopOutputs(StopReason cause, int index = -1, int pwm = 0, int32_t progress
   if (captured) captureFault(cause, index, pwm, progress);
   motorSetAwake(false);
   driverFaultLow = false;
+  // 普通停车、急停、故障停车、失联停车全部汇合到这里：一并清空速度环的
+  // 误差历史与浮点累加器。少清一处，下一次起转就会带着上一次的残留状态
+  // （MCU-002/003：换向、重新起转后速度对不上，就是这里漏清导致的）。
+  resetSpeedLoop(-1);
   const bool endingDeadzone = mode == Mode::Active && runKind == DeadzoneRun;
   if (endingDeadzone) {
     uint32_t counts[2], invalid[2];
@@ -606,10 +638,7 @@ int pidWheelDuty(int index, float measuredCps, float goalCps, int differentialPw
   wheel.ffApplied = 0;
   (void)goalCps;   // 增量式只用本拍斜坡目标，保向差动另走 differentialPwm
   if (targetCps == 0 || wheel.target == 0) {
-    wheel.pid.reset();
-    // 停车时把增量式状态一起清掉，下次起转从零开始累加，不带旧历史。
-    incErr1[index] = incErr2[index] = 0.0f;
-    incPwm[index] = 0;
+    resetSpeedLoop(index);
     return 0;
   }
 
@@ -624,16 +653,28 @@ int pidWheelDuty(int index, float measuredCps, float goalCps, int differentialPw
   //     补到一半轮子还没转，补满才冲开，冲开后积分又过大导致掉速，表现就是
   //     "冲一下停一下"。增量式不存积分、只累加增量，负载怎么变就怎么跟，
   //     既不需要前馈曲线，也不存在积分饱和后回不来的问题。
+  // 增益从在线调参取，单位换算见 GAIN_*_SCALE 的注释。
+  const float kp = float(tuneValue(TuneKp)) * GAIN_KP_SCALE;
+  const float ki = float(tuneValue(TuneKi)) * GAIN_KI_SCALE;
+  const float kd = float(tuneValue(TuneKd)) * GAIN_KD_SCALE;
+
   const float err = targetCps - alongSpeed;             // 误差，编码器计数/s
-  const float delta = INC_KP * (err - incErr1[index])
-                    + INC_KI * err
-                    + INC_KD * (err - 2.0f * incErr1[index] + incErr2[index]);
+  const float delta = kp * (err - incErr1[index])
+                    + ki * err
+                    + kd * (err - 2.0f * incErr1[index] + incErr2[index]);
   incErr2[index] = incErr1[index];
   incErr1[index] = err;
 
-  int duty = incPwm[index] + int(std::lround(delta));
-  duty = std::clamp(duty, 0, pwmLimit);
-  incPwm[index] = duty;
+  if (!std::isfinite(delta)) {   // 编码器异常可能给出 inf/nan，宁可停车
+    resetSpeedLoop(index);
+    return 0;
+  }
+
+  // 浮点累加：小于 1 码的增量也保留，低增益时才能慢慢爬上去。
+  float accum = incPwmF[index] + delta;
+  accum = std::clamp(accum, 0.0f, float(pwmLimit));
+  incPwmF[index] = accum;        // 饱和时回写，等价于条件积分限幅
+  const int duty = std::clamp(int(std::lround(accum)), 0, pwmLimit);
   wheel.ffApplied = duty;
   // 保向差动是叠加在本拍输出上的独立修正。
   return std::clamp(duty + differentialPwm, 0, pwmLimit);
