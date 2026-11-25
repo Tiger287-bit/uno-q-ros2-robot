@@ -18,6 +18,7 @@ import app_state
 from app_state import (CAMERA, DETECTOR, PAUSED, RECORDER,
                        REQUESTS, SELFTEST, STATE, STATE_LOCK, TRACE)
 from payload import TUNE_APPLY_WAIT_S, TUNE_STALE_S, _rate_hz
+import scan_pipeline
 from scan_pipeline import LIDAR_FRAME_WAIT_S, SCAN_STATS
 
 def get_telemetry():
@@ -148,7 +149,10 @@ def get_lidar():
     """REST：雷达统计，由控制环每 2 s 刷新一次；附带 /scan 拼帧计数。"""
     with STATE_LOCK:
         status = STATE["lidar"]
-    return {"status": status, "scan": dict(SCAN_STATS)}
+    # scan 用 status() 而不是 dict(SCAN_STATS)：拼帧的实时诊断（连续重复次数、
+    # 退避原因与剩余时间、最后帧龄、最近一次错误）只在状态里，散在 SCAN_STATS
+    # 之外的字段以前根本没暴露出来。原有计数键全部保留，向后兼容。
+    return {"status": status, "scan": scan_pipeline.status()}
 
 
 def get_lidar_frame(seq: str = "0"):

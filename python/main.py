@@ -32,6 +32,7 @@ from app_state import (CAMERA, DETECTOR, JOY, LINK, MCU_STALE_S,
                        STARTUP_GRACE_S, STATE, STATE_LOCK, STOP_PENDING, TRACE,
                        UI, WEB)
 from payload import TUNE_REFRESH_TICKS, apply_tune, build_payload, refresh_tune
+import scan_pipeline
 from scan_pipeline import LIDAR_EVERY_TICKS, SCAN_STATS, fetch_scan_slice
 
 # MCU 会话跟踪：重启后 uptime/sequence 会归零，而轮子累计计数也跟着清零。
@@ -80,6 +81,10 @@ def track_mcu_session(status):
         # 只递增计数器，不再发独立通知：它随下一帧 joint_states 一起走。
         # 单独发一条会与轮帧竞态，晚到时还会二次重置。
         MCU_SESSION["epoch"] += 1
+        # 雷达拼帧必须跟着换会话：旧会话的分片、帧号基准、退避状态全部作废，
+        # 否则新会话的 seq 与旧的一致时会把两圈数据拼在一起（NAV-006-D）。
+        scan_pipeline.on_mcu_session_change(time.monotonic(),
+                                            "epoch=%d" % MCU_SESSION["epoch"])
         print("[main] 检测到 MCU 重启，计数世代 +1（epoch=%d）"
               % MCU_SESSION["epoch"], flush=True)
     MCU_SESSION["uptime"] = uptime

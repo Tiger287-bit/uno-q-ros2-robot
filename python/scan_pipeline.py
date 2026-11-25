@@ -1,4 +1,4 @@
-"""雷达分片拼帧：每拍最多读一片，拼齐且不过期才发布。
+"""雷达分片拼帧：每拍最多读一片，拼齐且校验通过才发布。
 
 为什么要分片
     ros_status 的整帧读取在 Bridge 上是一次 RPC，180 个分区一次读完会让控制拍
@@ -11,11 +11,11 @@
 本模块只有控制线程会调用，所以内部状态不加锁。
 
 时序约定
-    * ``next_try`` 是"下一次允许尝试读分片"的时刻，用它统一做节流与退避。
-      以前把 ``last_pub`` 直接写成 ``now + 2.0``（未来时刻），既是语义污染，
-      也导致一次重复帧就静默停读 2.38 s —— 超过代价地图 expected_update_rate
-      允许的间隔，Nav2 会判定观测过期而停止出速度。
-    * ``last_pub`` 只记录**真正发布成功**的时刻，供统计用。
+    * ``next_try`` 是"下一次允许尝试读分片"的时刻，统一做节流与退避。
+      ``last_pub`` 只记录**真正发布成功**的时刻，不写未来值。
+    * 固定元数据（seq / start_ms / period_ms / valid / sectors）在拼帧期间不可变，
+      动态量（latest / mcu_now）每片都更新 —— 过期判断必须用最后一片读到的最新
+      帧号，用第一片的会让 latest-seq 永远为 0，过期检查形同虚设。
 """
 
 import math
@@ -27,58 +27,68 @@ import config
 import ros_publishers as publishers
 
 LIDAR_FRAME_WAIT_S = 1.0
-# 扫描分片：180 个 2° 分区分三片，每拍最多读一片，避免一次把控制拍撑爆。
 LIDAR_SLICE = 60
 LIDAR_SECTORS = 180
+
 SCAN_PUBLISH_S = 0.38        # ≈2.6 Hz，首版只保证 2~3 Hz
-SCAN_STALE_SLICES = 4        # 拼齐时最新帧比目标大这么多才判过期，给慢拍留余量
-SCAN_IDLE_BACKOFF_S = 2.0    # **持续**停扫才用的长退避，偶发重复帧不走这里
-SCAN_DUP_RETRY_S = 0.12      # 偶发重复帧的短重试间隔：差不多下一拍再读
-SCAN_DUP_LIMIT = 3           # 连续这么多次重复才认为雷达真的停扫了
-# 帧龄上限。拼帧要三拍，正常只滞后 100~150 ms；首次读到的帧若是停扫前留下的
-# 旧帧，帧号仍是"最新"，只靠 latest-seq 判断不出来，必须按真实年龄拒。
-SCAN_MAX_AGE_MS = 400
-# 雷达状态 2 s 读一次。一次 ros_status 约 13 ms，控制拍只有 33 ms，
-# 两次 RPC 会把那一拍挤爆，所以只按低频读统计，帧数据按需另取。
+SCAN_STALE_SLICES = 4        # 最新帧号比本帧大这么多就判过期
+SCAN_IDLE_BACKOFF_S = 2.0    # **确认**停扫后的长退避
+SCAN_DUP_RETRY_S = 0.12      # 偶发重复帧的短重试
+SCAN_DUP_LIMIT = 3           # 连续重复这么多次，且帧确实变旧，才判停扫
+SCAN_MAX_AGE_MS = 400        # 帧龄上限
+# 固件协议：距离只能是 0（无回波）或 50~12000 mm。超出即视为分片损坏。
+SCAN_MIN_DIST_MM = 50
+SCAN_MAX_DIST_MM = 12000
+# lidar::start() 会 ++epoch 并把帧号从头开始；uptime 却不回退。帧号比上次发布的
+# 小这么多就认为雷达重新启动过（10 Hz 下正常只会递增，32 位回绕要 13 年）。
+SCAN_SEQ_REWIND = 5
+# MCU uptime 走 int32 传输，接近上限后回绕到 0。留 60 s 窗口判定为回绕而非重启。
+INT32_WRAP = 2 ** 31
+SCAN_WRAP_WINDOW_MS = 60000
+
 LIDAR_EVERY_TICKS = max(1, int(config.CONTROL_HZ * 2.0))
 
 
 def _new_state():
-    """拼帧状态。所有字段都在这里初始化为"空"，重置时整体换新更不易漏字段。"""
     return {
-        "seq": 0,           # 正在拼的帧号，0 表示空闲
+        "seq": 0,
         "ranges": None,
-        "meta": None,       # (seq, start_ms, period_ms, latest)
-        "next": 0,          # 下一片应从哪个分区开始
-        "next_try": 0.0,    # 下一次允许读分片的时刻
-        "last_pub": 0.0,    # 最近一次**成功发布**的时刻
+        "meta": None,        # (seq, start_ms, period_ms, valid, sectors) 固定
+        "dynamic": None,     # {"latest": int, "mcu_now": int} 每片更新
+        "next": 0,
+        "next_try": 0.0,
+        "last_pub": 0.0,     # 最近一次**成功发布**的时刻
         "last_pub_at": 0.0,
         "clock": None,
-        "last_seq": 0,      # 最近一次发布的帧号
-        "dup_streak": 0,    # 连续重复帧计数
-        "last_mcu_now": None,   # 上一次读到的 MCU uptime，用于识别重启
+        "last_seq": 0,       # 最近一次发布的帧号
+        "dup_streak": 0,
+        "last_mcu_now": None,
         "backoff_reason": "",
+        "backoff_until": 0.0,
+        "last_error": "",    # 最近一次 RPC/校验失败原因，给 /api/lidar
+        "last_frame_age_ms": -1,
     }
 
 
 SCAN_ASSEMBLY = _new_state()
 
-# 拼帧统计。以前只有计数、看不出原因；现在细分到"哪一环出的问题"，
-# 因为导航不动时最需要回答的就是"雷达到底是没数据，还是我们没去读"。
 SCAN_STATS = {
-    "slices": 0,              # 分片 RPC 次数
-    "published": 0,           # 成功发布的帧数
-    "stale": 0,               # 拼帧期间被新圈覆盖
-    "missing": 0,             # 分片缺失（帧被覆盖 / 帧号偏移不符）
-    "old": 0,                 # 帧龄超限被拒
-    "errors": 0,              # Bridge 抛异常
-    "duplicate_frames": 0,    # 读到与上次已发布帧号相同的帧
-    "invalid_slices": 0,      # 参数越界、长度不符、数值非法
-    "expired_frames": 0,      # 拼齐时按真实帧龄判为过期
-    "rpc_errors": 0,          # 同 errors，语义化别名
-    "session_resets": 0,      # 检测到 MCU 重启而清空拼帧状态
-    "dup_backoff": 0,         # 因持续重复帧进入长退避
-    "max_publish_gap_ms": 0,  # 两次成功发布之间的最大间隔
+    "slices": 0,
+    "published": 0,
+    "stale": 0,
+    "missing": 0,
+    "old": 0,
+    "errors": 0,
+    "duplicate_frames": 0,
+    "invalid_slices": 0,
+    "expired_frames": 0,
+    "rpc_errors": 0,
+    "session_resets": 0,
+    "lidar_restarts": 0,
+    "dup_backoff": 0,
+    "no_echo_frames": 0,      # valid==0，整圈没回波，不作为导航观测发布
+    "valid_mismatch": 0,      # 非零分区数与 valid 不一致
+    "max_publish_gap_ms": 0,
 }
 
 
@@ -88,47 +98,61 @@ def _note(key, amount=1):
 
 
 def reset_assembly(now=0.0, reason=""):
-    """清空拼帧状态。MCU 重启、会话变更、通道异常时调用。"""
+    """清空拼帧状态。MCU 重启、雷达重启、会话变更时调用。"""
     global SCAN_ASSEMBLY
-    old = SCAN_ASSEMBLY
     SCAN_ASSEMBLY = _new_state()
-    # 保留节流位，避免刚重置就立刻读；其余全部丢弃。
     SCAN_ASSEMBLY["next_try"] = now
     if reason:
         SCAN_ASSEMBLY["backoff_reason"] = reason
+        SCAN_ASSEMBLY["last_error"] = reason
         _note("session_resets")
-    del old
 
 
-def _valid_value(value):
-    """分区值必须是有限的非负数（毫米）。NaN/inf/负值一律视为分片非法。"""
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
+def on_mcu_session_change(now, epoch_note=""):
+    """给 main.py 的 track_mcu_session() 在检测到新会话时调用。"""
+    reset_assembly(now, "MCU 会话变更 %s" % (epoch_note or ""))
+
+
+def _int(value, default=None):
+    """元数据字段必须是整数；bool 也是 int 的子类，这里一并当非法。"""
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        return int(value)
+    return default
+
+
+def _valid_distance(value):
+    """返回毫米值；协议不允许的值返回 None。0 表示无回波，是合法值。"""
+    number = _int(value)
+    if number is None or number < 0:
         return None
-    if not math.isfinite(number) or number < 0.0:
+    if number == 0:
+        return 0
+    if number < SCAN_MIN_DIST_MM or number > SCAN_MAX_DIST_MM:
         return None
     return number
 
 
 def _fill_slice(state, offset, count, values):
-    """把一片毫米值写进米制的 ranges。
-
-    @return: 参数合法并已写入返回 True；否则返回 False 且**不修改** state
-             （调用方据此丢弃整帧，避免把半帧无效数据发成扫描）。
-    """
-    if count <= 0 or offset < 0 or offset + count > LIDAR_SECTORS:
+    """把一片毫米值写进米制 ranges。任何校验失败都返回 False 且不修改 state。"""
+    if count <= 0 or count > LIDAR_SLICE:
+        return False
+    if offset < 0 or offset + count > LIDAR_SECTORS:
         return False
     if offset != state["next"]:
         return False
-    if len(values) < count:
+    # 严格相等：声明 60 却只给 30，不能把剩下的当成 0 米发出去。
+    if len(values) != count:
         return False
     converted = []
-    for value in values[:count]:
-        number = _valid_value(value)
-        if number is None:
+    for value in values:
+        mm = _valid_distance(value)
+        if mm is None:
             return False
-        converted.append(round(number / 1000.0, 3))
+        converted.append(round(mm / 1000.0, 3))
     for index, metre in enumerate(converted):
         state["ranges"][offset + index] = metre
     state["next"] = offset + count
@@ -136,148 +160,213 @@ def _fill_slice(state, offset, count, values):
 
 
 def _read_slice(seq, offset, now):
-    """读一片，返回解包后的元组；异常或长度不足返回 None。"""
     _note("slices")
     try:
         raw = Bridge.call("lidar_slice", seq, offset, LIDAR_SLICE,
                           timeout=config.MCU_TIMEOUT_S)
-    except Exception:            # noqa: BLE001  抛异常也不能让控制拍崩
+    except Exception as exc:     # noqa: BLE001
         _note("errors")
         _note("rpc_errors")
+        SCAN_ASSEMBLY["last_error"] = "lidar_slice 异常: %s" % exc
         return None
-    if not isinstance(raw, (list, tuple)) or len(raw) < 9:
+    if not isinstance(raw, (list, tuple)) or len(raw) < 10:
         _note("errors")
         _note("rpc_errors")
+        SCAN_ASSEMBLY["last_error"] = "lidar_slice 返回长度不足"
         return None
     return raw
 
 
-def _check_mcu_restart(state, mcu_now):
-    """MCU 重启会让 uptime 回到 0。用较大的回退量判断，避免计数回绕误判。"""
+def _is_int32_wrap(previous, current):
+    return (previous > INT32_WRAP - SCAN_WRAP_WINDOW_MS
+            and current < SCAN_WRAP_WINDOW_MS)
+
+
+def _check_session(state, mcu_now, rseq):
+    """识别 MCU 重启（uptime 回退）与雷达重启（帧号回退且 uptime 未退）。"""
     previous = state["last_mcu_now"]
-    if previous is not None and mcu_now + 1000 < previous:
-        reset_assembly(0.0, "MCU 重启（uptime 回退）")
+    if (previous is not None and mcu_now < previous
+            and not _is_int32_wrap(previous, mcu_now)):
+        reset_assembly(0.0, "MCU 重启（uptime 回退 %d->%d）" % (previous, mcu_now))
+        return True
+    last_seq = state["last_seq"]
+    if last_seq > 0 and rseq + SCAN_SEQ_REWIND < last_seq:
+        reset_assembly(0.0, "雷达重启（帧号 %d->%d）" % (last_seq, rseq))
+        _note("lidar_restarts")
         return True
     state["last_mcu_now"] = mcu_now
     return False
 
 
 def fetch_scan_slice(now):
-    """每拍最多读一个雷达分片；拼齐且不过期才发布，否则整帧丢弃。
-
-    调用点必须排在指令下发之后——雷达读得再慢，也不能让停车晚一拍。
-    """
+    """每拍最多读一个雷达分片；拼齐且全部校验通过才发布。"""
     state = SCAN_ASSEMBLY
     if now < state["next_try"]:
         return
 
     seq = state["seq"]
     if seq != 0:
-        # 拼帧中：每拍允许再读一片。空闲态的 next_try 由下面各条出口各自决定，
-        # 不能在读之前就推后 —— 否则第一片读成功后，第 2、3 片会被同一个
-        # 发布周期节流挡住，三片永远凑不齐（首版测试就是这么暴露出来的）。
-        state["next_try"] = now
+        state["next_try"] = now      # 拼帧中：每拍一片
 
-    raw = _read_slice(seq, 0 if seq == 0 else state["next"], now)
+    offset_wanted = 0 if seq == 0 else state["next"]
+    raw = _read_slice(seq, offset_wanted, now)
     if raw is None:
         SCAN_ASSEMBLY["seq"] = 0
-        SCAN_ASSEMBLY["next_try"] = now + (SCAN_PUBLISH_S if seq == 0
-                                           else SCAN_PUBLISH_S)
+        SCAN_ASSEMBLY["next_try"] = now + SCAN_PUBLISH_S
         if seq != 0:
             _note("missing")
         return
 
-    (rseq, start_ms, period_ms, _valid, sectors, offset, count,
-     latest, mcu_now) = raw[:9]
-    if _check_mcu_restart(state, mcu_now):
-        return                    # 状态已重置，这一拍作废
-
-    if sectors != LIDAR_SECTORS or count <= 0:
+    rseq = _int(raw[0])
+    start_ms = _int(raw[1])
+    period_ms = _int(raw[2])
+    valid = _int(raw[3])
+    sectors = _int(raw[4])
+    offset = _int(raw[5])
+    count = _int(raw[6])
+    latest = _int(raw[7])
+    mcu_now = _int(raw[8])
+    if None in (rseq, start_ms, period_ms, valid, sectors, offset, count,
+                latest, mcu_now):
         _note("invalid_slices")
+        SCAN_ASSEMBLY["last_error"] = "元数据非整数"
         SCAN_ASSEMBLY["seq"] = 0
+        SCAN_ASSEMBLY["next_try"] = now + SCAN_PUBLISH_S
+        return
+
+    if _check_session(state, mcu_now, rseq):
+        return
+
+    if sectors != LIDAR_SECTORS or count <= 0 or count > LIDAR_SLICE:
+        _note("invalid_slices")
+        SCAN_ASSEMBLY["last_error"] = "sectors/count 非法 %s/%s" % (sectors, count)
+        SCAN_ASSEMBLY["seq"] = 0
+        SCAN_ASSEMBLY["next_try"] = now + SCAN_PUBLISH_S
+        return
+    if not (0 <= valid <= LIDAR_SECTORS):
+        _note("invalid_slices")
+        SCAN_ASSEMBLY["last_error"] = "valid 越界 %d" % valid
+        SCAN_ASSEMBLY["seq"] = 0
+        SCAN_ASSEMBLY["next_try"] = now + SCAN_PUBLISH_S
         return
 
     if seq == 0:
-        # ---- 空闲态读到的第一片 ----
+        # ---------------- 第一片：建立固定元数据 ----------------
         if offset != 0:
             _note("invalid_slices")
-            state["next_try"] = now + SCAN_PUBLISH_S
+            SCAN_ASSEMBLY["seq"] = 0
+            SCAN_ASSEMBLY["next_try"] = now + SCAN_PUBLISH_S
             return
         if rseq == state["last_seq"]:
-            # 帧号没前进。偶发重复只做短重试；连续重复才认为真的停扫。
             _note("duplicate_frames")
-            if state["dup_streak"] + 1 >= SCAN_DUP_LIMIT:
-                state["dup_streak"] = 0
+            frame_age = mcu_now - start_ms
+            state["last_frame_age_ms"] = frame_age
+            state["dup_streak"] += 1
+            if (state["dup_streak"] >= SCAN_DUP_LIMIT
+                    and frame_age > SCAN_PUBLISH_S * 1000.0):
+                # 连续重复 **且** 这一帧本身已经不年轻，才判停扫。
                 state["next_try"] = now + SCAN_IDLE_BACKOFF_S
-                state["backoff_reason"] = ("雷达停扫：连续 %d 帧重复"
-                                           % SCAN_DUP_LIMIT)
+                state["backoff_until"] = now + SCAN_IDLE_BACKOFF_S
+                state["backoff_reason"] = (
+                    "雷达停扫：连续 %d 帧重复，帧龄 %d ms"
+                    % (state["dup_streak"], frame_age))
                 _note("dup_backoff")
             else:
-                state["dup_streak"] += 1
                 state["next_try"] = now + SCAN_DUP_RETRY_S
             return
         state["dup_streak"] = 0
+        state["backoff_reason"] = ""
         if mcu_now - start_ms > SCAN_MAX_AGE_MS:
-            # 停扫前留下的旧帧：帧号最新但已经放了很久，按真实年龄拒。
             _note("old")
+            state["last_frame_age_ms"] = mcu_now - start_ms
+            state["last_error"] = "首片帧龄 %d ms 超限" % (mcu_now - start_ms)
             state["next_try"] = now + SCAN_PUBLISH_S
             return
         state["ranges"] = [0.0] * LIDAR_SECTORS
         state["next"] = 0
-        state["meta"] = (rseq, start_ms, period_ms, latest)
+        state["meta"] = (rseq, start_ms, period_ms, valid, sectors)
+        state["dynamic"] = {"latest": latest, "mcu_now": mcu_now}
         state["clock"] = (mcu_now, time.time())
         if not _fill_slice(state, offset, count, raw[9:]):
             _note("invalid_slices")
+            state["last_error"] = "首片数据校验失败"
             SCAN_ASSEMBLY["seq"] = 0
             SCAN_ASSEMBLY["next_try"] = now + SCAN_PUBLISH_S
             return
         state["seq"] = rseq
-        state["next_try"] = now        # 拼帧中：下一拍立刻可以读第二片
+        state["next_try"] = now
     else:
-        # ---- 拼帧中的后续分片 ----
-        if rseq != seq or offset != state["next"]:
-            _note("missing")
+        # ---------------- 后续分片：固定元数据必须完全一致 ----------------
+        meta = state["meta"]
+        fixed_ok = (rseq == meta[0] and start_ms == meta[1]
+                    and period_ms == meta[2] and valid == meta[3]
+                    and sectors == meta[4])
+        if not fixed_ok or offset != state["next"]:
+            _note("invalid_slices")
+            state["last_error"] = (
+                "分片元数据不一致 seq=%s start=%s period=%s valid=%s/%s"
+                % (rseq, start_ms, period_ms, valid, meta[3]))
             SCAN_ASSEMBLY["seq"] = 0
             SCAN_ASSEMBLY["next_try"] = now + SCAN_PUBLISH_S
             return
-        meta_seq, start_ms0, _p0, _l0 = state["meta"]
-        if rseq != meta_seq:          # 分片不属于同一帧
-            _note("invalid_slices")
-            SCAN_ASSEMBLY["seq"] = 0
-            return
-        state["clock"] = (mcu_now, time.time())   # 用最后一片时刻做发布基准最准
+        # 动态量：每片都更新，发布时用**最后一片**的最新帧号与 MCU 时间
+        state["dynamic"]["latest"] = latest
+        state["dynamic"]["mcu_now"] = mcu_now
+        state["clock"] = (mcu_now, time.time())
         if not _fill_slice(state, offset, count, raw[9:]):
             _note("invalid_slices")
+            state["last_error"] = "分片数据校验失败 offset=%d" % offset
             SCAN_ASSEMBLY["seq"] = 0
+            SCAN_ASSEMBLY["next_try"] = now + SCAN_PUBLISH_S
             return
 
     if state["next"] < LIDAR_SECTORS:
-        return                        # 还没拼齐，下一拍继续
+        return
 
-    # ---- 发布前的最终校验：全部按"此刻"的真实条件判，不看历史 ----
-    meta_seq, start_ms, period_ms, latest = state["meta"]
+    # ---------------- 发布前最终校验 ----------------
+    meta_seq, start_ms, period_ms, valid, _sectors = state["meta"]
+    latest = state["dynamic"]["latest"]
+    mcu_now = state["dynamic"]["mcu_now"]
+    state["last_frame_age_ms"] = mcu_now - start_ms
+
     if meta_seq != seq:
         _note("invalid_slices")
         SCAN_ASSEMBLY["seq"] = 0
         return
     if latest - seq > SCAN_STALE_SLICES:
-        # 拼的过程中已经过去好几圈：帧号能看出来，直接丢。
+        _note("stale")
+        state["last_error"] = "过期：latest-seq=%d" % (latest - seq)
         SCAN_ASSEMBLY["seq"] = 0
         SCAN_ASSEMBLY["next_try"] = now + SCAN_PUBLISH_S
-        _note("stale")
         return
     if mcu_now - start_ms > SCAN_MAX_AGE_MS:
-        # 帧号差看不出来的情况：分片之间 RPC 抖动，拼齐时已经过期。
+        _note("expired_frames")
+        state["last_error"] = "帧龄 %d ms 超限" % (mcu_now - start_ms)
         SCAN_ASSEMBLY["seq"] = 0
         SCAN_ASSEMBLY["next_try"] = now
-        _note("expired_frames")
+        return
+    # valid 是本圈有回波的分区数，必须与实际非零分区数一致，否则数据是坏的。
+    nonzero = sum(1 for value in state["ranges"] if value > 0.0)
+    if nonzero != valid:
+        _note("valid_mismatch")
+        state["last_error"] = "valid 与实际有效分区不符 %d!=%d" % (valid, nonzero)
+        SCAN_ASSEMBLY["seq"] = 0
+        SCAN_ASSEMBLY["next_try"] = now + SCAN_PUBLISH_S
+        return
+    if valid == 0:
+        # 整圈没有回波：不算硬件故障，但不能作为导航障碍物观测发布。
+        _note("no_echo_frames")
+        state["last_error"] = "整圈无回波（valid=0），不发布"
+        SCAN_ASSEMBLY["seq"] = 0
+        SCAN_ASSEMBLY["next_try"] = now + SCAN_PUBLISH_S
         return
 
     try:
         publishers.publish_scan(start_ms, period_ms, state["ranges"],
                                 LIDAR_SECTORS, state.get("clock"))
-    except Exception:            # noqa: BLE001
+    except Exception as exc:     # noqa: BLE001
         _note("errors")
+        SCAN_ASSEMBLY["last_error"] = "publish_scan 异常: %s" % exc
         SCAN_ASSEMBLY["seq"] = 0
         return
 
@@ -291,21 +380,31 @@ def fetch_scan_slice(now):
     state["seq"] = 0
     state["next"] = 0
     state["ranges"] = None
+    state["meta"] = None
+    state["dynamic"] = None
     state["next_try"] = now + SCAN_PUBLISH_S
     state["backoff_reason"] = ""
+    state["backoff_until"] = 0.0
     _note("published")
 
 
 def status():
-    """给 /api/lidar 的诊断快照。"""
+    """诊断快照。由 /api/lidar 直接返回，保证与拼帧同一份数据。"""
     state = SCAN_ASSEMBLY
     snapshot = dict(SCAN_STATS)
     snapshot.update({
         "consecutive_duplicates": state["dup_streak"],
         "backoff_reason": state["backoff_reason"],
+        "backoff_remaining_s": max(0.0, round(state["backoff_until"]
+                                              - time.monotonic(), 2)),
         "assembling": state["seq"] != 0,
         "assembled_slices": state["next"] // LIDAR_SLICE,
         "published_frames": SCAN_STATS["published"],
         "last_publish_at": state["last_pub_at"],
+        "last_frame_age_ms": state["last_frame_age_ms"],
+        "last_error": state["last_error"],
+        # 语义澄清：publish_scan() 只是投给本地 Publisher 的队列，
+        # 不代表 WebSocket 已发出，也不代表 Nav2 已收到。
+        "published_means": "local_publisher_enqueue",
     })
     return snapshot
