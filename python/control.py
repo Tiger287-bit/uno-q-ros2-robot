@@ -65,6 +65,30 @@ def _turn_channels(linear_m_s):
     return forward, reverse
 
 
+# 低于这个线速度时允许原地转；超过它，内轮就不允许反转（避免刮擦与突然换向）。
+VMIN_PIVOT_M_S = 0.008
+
+
+def _continuous_turn(request, linear_m_s):
+    """把转向分量压进连续可达范围，替代原来的"二选一吸附"。
+
+    旧实现把不可达的转向量吸附到 forward / reverse 两个端点，结果是摇杆在
+    临界点附近挪一点，实际角速度就从 0.280 跳到 0.763（实测，2.7 倍），内轮
+    同时由 +600 翻到 -600 —— 转弯突然变急、车头甩动、电流突增都来自这里。
+
+    新函数只做限幅、不做吸附：
+      * 线速度 >= VMIN_PIVOT：转向分量不超过 |v|，内轮最低到 0，绝不反转；
+      * 线速度接近 0：可用转向额度连续放大到 MAX_TURN_M_S，原地转仍可用；
+      * 两段之间线性过渡，映射整体连续、单调，不存在跳变点。
+    """
+    span = abs(linear_m_s)
+    if span >= VMIN_PIVOT_M_S:
+        return min(request, span)
+    blend = span / VMIN_PIVOT_M_S if VMIN_PIVOT_M_S > 0 else 1.0
+    limit = span + (MAX_TURN_M_S - span) * (1.0 - blend)
+    return min(request, limit)
+
+
 def _snap_turn(magnitude, forward, reverse):
     """把落在两通道之间的转向分量吸附到最近的可达边界。"""
     if magnitude <= forward:
@@ -76,7 +100,8 @@ def _snap_turn(magnitude, forward, reverse):
     return forward
 
 
-def wheel_targets(linear_m_s, angular_rad_s, snap=True, allow_pivot=True):
+def wheel_targets(linear_m_s, angular_rad_s, snap=True, allow_pivot=True,
+                  mapping="continuous"):
     """差速分解为双轮目标，返回 (M1 右轮, M2 左轮)，计数/s。
 
     snap 是"内轮吸附"，只该给人手操作用：摇杆的小幅转向会让内轮落在
@@ -88,6 +113,11 @@ def wheel_targets(linear_m_s, angular_rad_s, snap=True, allow_pivot=True):
     反转，实际角速度从 0.280 跳到 0.763 rad/s。
     """
     if not (math.isfinite(linear_m_s) and math.isfinite(angular_rad_s)):
+        return 0, 0
+    # 零输入必须严格输出零：摇杆回中、松杆、急停走的都是这条路径。
+    # allow_pivot=False 的分支会把零线速度补成最小前进速度，若不在这里拦住，
+    # (0,0) 会输出 (600,600) —— 实测确认过，属于必须堵死的安全缺陷。
+    if not linear_m_s and not angular_rad_s:
         return 0, 0
 
     linear_m_s = max(-VMAX_M_S, min(VMAX_M_S, linear_m_s))
@@ -108,8 +138,14 @@ def wheel_targets(linear_m_s, angular_rad_s, snap=True, allow_pivot=True):
         request = min(request, span * 0.9)
         turn = math.copysign(request, angular_rad_s)
     elif snap:
-        forward, reverse = _turn_channels(linear_m_s)
-        turn = math.copysign(_snap_turn(request, forward, reverse), angular_rad_s)
+        # mapping="snap" 保留旧的二元吸附，仅供手感对比；默认走连续限幅。
+        if mapping == "snap":
+            forward, reverse = _turn_channels(linear_m_s)
+            turn = math.copysign(_snap_turn(request, forward, reverse),
+                                 angular_rad_s)
+        else:
+            turn = math.copysign(_continuous_turn(request, linear_m_s),
+                                 angular_rad_s)
     else:
         # 精确差速：按指令的曲率分配，内轮该反转就反转。
         turn = math.copysign(request, angular_rad_s)
