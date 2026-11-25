@@ -10,7 +10,7 @@
  */
 
 import { SEND_INTERVAL_MS, ZERO_EPS } from "./config.js";
-import { currentCmd, releaseAll } from "./input.js";
+import { currentCmd, releaseAll, setOnline } from "./input.js";
 import { state } from "./state.js";
 import { setBadge, showLocal } from "./ui.js";
 
@@ -38,11 +38,13 @@ export function connectSocket(statusHandler, navHandler) {
   socket.on("connect", () => {
     setBadge("connBadge", "实时已连接", "ok");
     state.lastSocketAt = performance.now();
+    // 重连也要清一次：断线期间产生的输入不能带过来，必须重新操作。
+    setOnline(true);
   });
 
   socket.on("disconnect", () => {
     setBadge("connBadge", "页面未连接", "bad");
-    releaseAll();
+    setOnline(false);      // 内部会 releaseAll() 并锁住指令输出
   });
 
   socket.on("robot_status", (payload) => {

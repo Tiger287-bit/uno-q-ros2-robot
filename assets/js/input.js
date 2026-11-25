@@ -26,6 +26,10 @@ let activePointer = null;                        // 正在拖摇杆的 pointerId
 // 以前存方向名：W 与方向键上都映射到 "up"，两个一起按住再松一个，
 // up 就被删掉了 —— 另一个键明明还按着，车却提前停。
 const held = new Set();
+// 链路是否在线。断线期间与重连瞬间都必须禁止产生可执行运动指令：
+// 断线时只清 held 是不够的 —— 用户在这期间按住 W 会重新触发 keydown，
+// 重连后 50ms 定时循环立刻把它发出去，等于"没重新操作车自己跑起来"。
+let online = true;
 
 /** 该事件是否来自当前拖动中的指针。没有 pointerId 的事件（合成/旧环境）一律放行。 */
 function ownsPointer(event) {
@@ -67,12 +71,23 @@ function speedScale() {
 
 /** 归一化指令换算成物理速度。px 向右 → angular.z 取负（ROS 左手系）。 */
 export function currentCmd() {
+  // 断线时一律输出零：这里是指令的唯一出口，摇杆与键盘都经过它，
+  // 单点拦住比在每个输入源上各加一遍更难漏。
+  if (!online) return { linear: 0, angular: 0 };
   const scale = speedScale();
   return {
     linear: state.py * state.limits.linear * scale,
     angular: -state.px * state.limits.angular * scale,
   };
 }
+
+/** 链路状态变化：断开与重连都清空输入，重连后必须重新操作才能运动。 */
+export function setOnline(value) {
+  online = !!value;
+  releaseAll();
+}
+
+export function isOnline() { return online; }
 
 export function renderCmdReadout() {
   const cmd = currentCmd();
