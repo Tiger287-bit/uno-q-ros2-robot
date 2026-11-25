@@ -19,7 +19,18 @@ import os
 import threading
 import time
 
-import cv2
+# OpenCV 只在采集线程里用，且是可选功能：摄像头不存在、镜像里没装 cv2、
+# 或 ARM64 轮子缺失时，绝不能因此让整个 App 启动失败。
+# 这里做成软导入 —— 模块级没有一处 cv2.X 调用（全部在函数内），所以 cv2=None
+# 时本模块仍可正常导入，只有真正去采集时才会报错，并由 status() 告知页面。
+try:
+    import cv2
+    CV2_AVAILABLE = True
+    CV2_ERROR = ""
+except Exception as _exc:  # noqa: BLE001
+    cv2 = None
+    CV2_AVAILABLE = False
+    CV2_ERROR = "%s: %s" % (type(_exc).__name__, _exc)
 
 # 采集与输出尺寸。
 #

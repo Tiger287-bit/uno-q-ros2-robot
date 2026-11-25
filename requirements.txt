@@ -1,0 +1,17 @@
+# Python 依赖清单（UNO Q / aarch64，Python 3.12）
+#
+# 只列**项目直接使用**的第三方包。以下由 Arduino App Lab 运行时或官方 Brick
+# 间接提供，**不要**在这里重复安装，否则容易和镜像里的版本打架：
+#   arduino          App Lab 运行时（WebUI/RouterBridge 绑定）
+#   ros2_bridge      bricks/ros2_bridge 内的本地模块
+#   rclpy/tf2_ros    ROS 2 Jazzy 容器内提供，宿主机无需安装
+#
+# 安装（宿主机 Python 侧需要时）：
+#   python3 -m pip install -r requirements.txt
+
+# 摄像头采集与 MJPEG 编码。ARM64 请优先用系统包，避免编译：
+#   sudo apt install python3-opencv
+# 若必须用 pip，确认有 aarch64 轮子（opencv-python-headless 通常有）。
+opencv-python-headless>=4.8,<5
+
+# 说明：项目内没有直接 import numpy，但 cv2 依赖它，故不单独列。
