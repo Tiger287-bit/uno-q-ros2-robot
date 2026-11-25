@@ -1,0 +1,2 @@
+# App Python 侧（不是 ROS 容器）依赖，用于订阅 rosbridge。
+websockets==15.0.1

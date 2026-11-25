@@ -1,0 +1,20 @@
+# 固件编译配置。
+#
+# 版本组合必须与验证过的 uno-q-ros2 保持一致：平台 1.1.0 + RouterBridge 0.4.4
+# + RPClite 0.3.1。板上同时装有 1.0.0 / 0.4.3 / 0.3.0，但那套组合编出来的
+# 固件不会向 arduino-router 注册任何 RPC 方法（ros_status 全部报
+# "method not available"，遥测一帧都取不到）。两套都在本机 arduino15 里，
+# 指定 1.1.0 不会触发在线下载。
+profiles:
+  default:
+    fqbn: arduino:zephyr:unoq
+    platforms:
+      - platform: arduino:zephyr (1.1.0)
+    libraries:
+      - Arduino_RouterBridge (0.4.4)   # Bridge.provide_safe 与 RPC 传输
+      - Arduino_RPClite (0.3.1)        # RPC 编解码
+      - MsgPack (0.4.2)                # ros_status 返回 vector<int32_t> 需要
+      - ArxContainer (0.7.0)
+      - ArxTypeTraits (0.3.2)
+      - DebugLog (0.8.4)
+default_profile: default

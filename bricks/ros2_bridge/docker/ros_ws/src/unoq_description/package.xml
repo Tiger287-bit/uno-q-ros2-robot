@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package format="3">
+  <name>unoq_description</name>
+  <version>0.1.0</version>
+  <description>Robot description for the UNO Q differential-drive chassis.</description>
+  <maintainer email="unoq@example.invalid">UNO Q Project</maintainer>
+  <license>NOASSERTION</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

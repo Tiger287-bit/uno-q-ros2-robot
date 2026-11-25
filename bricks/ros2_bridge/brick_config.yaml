@@ -1,0 +1,47 @@
+# ROS 2 Bridge — 自定义 Brick 清单。
+# 字段依据官方 manifest 规范：
+# https://docs.arduino.cc/software/app-lab/bricks/bricks-reference/
+
+# 必须与目录名一致；自定义 brick 不加 arduino: 前缀。
+id: ros2_bridge
+name: ROS 2 Bridge
+description: >-
+  ROS 2 Jazzy 容器，内含 rosbridge WebSocket 服务、游戏手柄驱动与速度指令仲裁。
+  手柄（/dev/input/js*）与网页键盘两路速度指令经 cmd_vel_mux 仲裁后统一发布
+  /cmd_vel，供 App 控制环订阅；App 侧通过 WebSocket 订阅话题，接口见 __init__.py。
+
+# 官方分类之一：ai / audio / image / location / miscellaneous / storage / text / ui / video
+category: miscellaneous
+
+supported_boards:
+  - unoq
+
+# 官方惯例：端口全部由 compose 自己声明，此处留空。
+# 本 brick 的 compose 刻意不映射任何端口（App 主容器走 Compose 网络直连
+# ros2:9090）。这里必须留空 —— 若在此声明 ports，编排器会给 App 主容器
+# 也绑一份，与 compose 的映射撞车导致启动失败。
+ports: []
+
+variables:
+  - name: ROSBRIDGE_URL
+    description: >-
+      App 侧访问 rosbridge 的地址。ros2 是 compose 服务名，由 Docker 内置 DNS
+      解析，不要写成 IP 或 localhost。
+    default_value: "ws://ros2:9090"
+    hidden: true
+
+  # 刻意不声明 BIND_ADDRESS。
+  #
+  # 那是平台与官方 compose 共用的保留名（官方 brick 里写
+  # ${BIND_ADDRESS:-127.0.0.1}、${BIND_ADDRESS:-0.0.0.0} 等），在这里声明
+  # 同名变量会作为用户变量注入，直接覆盖掉官方默认值 —— 之前就是这样
+  # 把 9090 开到 0.0.0.0 的。本 brick 不映射端口，不再需要它。
+  #
+  # 将来若确实要重新开放端口，请在 compose 里另起名字
+  # （如 ROSBRIDGE_BIND_ADDRESS），不要复用平台的 BIND_ADDRESS。
+
+  - name: ROS_DOMAIN_ID
+    description: >-
+      ROS 2 域号。域号不同的节点彼此不可见，多块板子同网或与电脑联调时
+      用它隔离话题。
+    default_value: "0"

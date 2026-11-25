@@ -1,0 +1,33 @@
+[Unit]
+# 开机自动把机器人 App 拉起来。
+#
+# 为什么需要：`arduino-app-cli` 没有 autostart 命令，板子一旦掉电重启（现场最常见，
+# 电池电压低时电机启动电流会把整机拉复位），App 会停在 stopped —— 网页打不开、
+# 手柄没反应，必须有人手动点一次。演示时这等于"机器人死了"。
+#
+# 依赖顺序：docker 先起；arduino-app-cli 守护进程先起（app start 是通过它执行的）；
+# user@1000 先起，否则 /run/user/1000/pipewire-0 还不存在，compose 的 bind mount
+# 会挂到一个空目录上。
+Description=UNO Q robot app (uno-q-ros2-demo)
+After=docker.service arduino-app-cli.service user@1000.service
+Wants=arduino-app-cli.service user@1000.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=arduino
+Group=arduino
+Environment=HOME=/home/arduino
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+# 等守护进程真正可用再动手：After= 只保证启动顺序，不保证它已经能响应。
+# 最多等 2 分钟，超时就失败退出（systemctl status 能看出是等超时）。
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 60); do /usr/bin/arduino-app-cli app list >/dev/null 2>&1 && exit 0; sleep 2; done; exit 1'
+# 首次启动要编译并烧录 sketch（约 40 s），给足超时。
+ExecStart=/usr/bin/arduino-app-cli app start /home/arduino/ArduinoApps/uno-q-ros2-demo
+ExecStop=/usr/bin/arduino-app-cli app stop /home/arduino/ArduinoApps/uno-q-ros2-demo
+TimeoutStartSec=600
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

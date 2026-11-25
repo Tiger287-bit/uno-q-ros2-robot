@@ -1,0 +1,108 @@
+/* 摄像头面板。
+ *
+ * 单独成文件而不是并进 app.css：这一块只在有摄像头的 App 里用得上，
+ * 画面比例、全屏放大、深色底这些规则放在通用组件表里会和"卡片/按钮"混在一起。
+ * 依赖 tokens.css 的变量与 app.css 的 .card / .tag / .hint。
+ */
+
+.camera-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.camera-head h2 { margin: 0; font-size: 15px; }
+/* 状态标签吃掉中间空白，把两个按钮推到右边 */
+.camera-head .tag { margin-left: auto; }
+.camera-head button {
+  padding: 4px 10px;
+  min-height: 30px;
+  font-size: 12px;
+}
+
+/* 画面区：固定高度 + contain，不锁宽高比。
+ *
+ * 摄像头被线束逼着装成侧向，后端会顺时针转 90°，输出 360x640（竖屏）。
+ * 竖屏按卡片宽度铺满会有 580px 高，把整列拉得很长；所以这里只固定高度，
+ * 让 img 在框内 contain 居中 —— 横屏时上下留边、竖屏时左右留边，
+ * 之后改旋转角度也不用动布局。 */
+.camera-frame {
+  position: relative;
+  height: clamp(240px, 44vh, 440px);
+  background: #0b1220;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  line-height: 0;
+}
+.camera-frame img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.camera-detail {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 放大：用 100vmax 的阴影伪造全屏遮罩，省掉一个额外的 <div class="overlay">。
+   固定定位后 .card + .card 的 margin 不再影响布局。 */
+.camera-card.expanded {
+  position: fixed;
+  inset: 16px;
+  z-index: 60;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 0 0 100vmax rgba(15, 23, 42, .55),
+              0 24px 80px rgba(15, 23, 42, .45);
+}
+.camera-card.expanded .camera-frame {
+  flex: 1;
+  height: auto;
+  min-height: 0;
+}
+.camera-card.expanded .camera-detail { flex: none; }
+
+/* ============ 检测叠加层 ============ */
+/* 画布盖在画面上，不接收指针事件：双击放大仍然落在 img 上。 */
+.camera-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.detect-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+/* 这一行里 .camera-detail 已有上边距，会把这行撑高，去掉 */
+.detect-row .camera-detail { margin: 0; }
+
+.detect-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.detect-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-subtle);
+}
+.detect-dot { width: 8px; height: 8px; border-radius: 50%; }
+.detect-name { color: var(--text); }
+.detect-score { color: var(--text-muted); font-variant-numeric: tabular-nums; }

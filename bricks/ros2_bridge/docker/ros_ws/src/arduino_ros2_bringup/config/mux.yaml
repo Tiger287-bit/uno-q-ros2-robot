@@ -1,0 +1,46 @@
+# cmd_vel_mux 参数（ROS 2 参数文件，节点名必须与 launch 里的 name 一致）。
+#
+# 新增一路速度来源（导航、另一台遥控器、上层行为树……）只需往 input_topics
+# 追加话题名，无需改节点代码，也无需改 App 侧。仲裁规则见节点文档字符串。
+
+cmd_vel_mux:
+  ros__parameters:
+    # 参与仲裁的输入。列表顺序不代表优先级。
+    input_topics:
+      - /cmd_vel_joy
+      - /cmd_vel_web
+      - /cmd_vel_nav
+
+    # 人工来源：只要在 manual_hold_s 内有非零指令，就压过其它来源。
+    # 不这么分优先级的话，Nav2 的 10 Hz 连续帧会周期性地盖住手柄帧，
+    # 表现为"人推着摇杆，车却被导航拽走"。
+    # 人工接管与取消导航的联动在 nav_bridge 里：它订阅本节点发布的
+    # /cmd_vel_source，发现来源变成手柄/网页就把导航目标 cancel 掉。
+    manual_topics:
+      - /cmd_vel_joy
+      - /cmd_vel_web
+
+    # 下游唯一出口，App 控制环订阅这个。
+    output_topic: /cmd_vel
+
+    # 输出频率，Hz。与 js_joy_node 的 rate 一致，避免下游看到抖动。
+    publish_hz: 50.0
+
+    # 自动来源（导航）静默多久视为结束（s）。太大则导航停了车还在走，
+    # 太小则控制器偶尔慢一拍就断流。
+    hold_s: 0.35
+
+    # 人工输入非零之后，自动来源要被压住多久（s）。
+    # 这个值决定"人手点一下"到"导航被允许恢复"之间的最小间隔，给取消命令
+    # 留出时间。mux 看不到取消是否完成，所以只能靠时长兜底。
+    takeover_latch_s: 1.5
+
+    # 人工来源静默多久算收手（s），用于 _pick 里判断"人还在开车"。
+    manual_hold_s: 0.30
+
+    # /cmd_vel_source 的心跳频率（Hz）。App 用它判断当前这一帧该不该做
+    # 轮速吸附，所以即使来源不变也要定期重发。
+    source_hz: 2.0
+
+    # 判定"非零"的下限，滤掉摇杆回中后 ±0.0001 量级的浮点残值。
+    epsilon: 0.0001

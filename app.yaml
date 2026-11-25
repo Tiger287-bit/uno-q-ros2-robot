@@ -1,0 +1,11 @@
+name: UNO Q ROS 2
+description: UNO Q 差速小车底盘控制：ROS 2 接入，手柄与网页双路遥控
+icon: 🤖
+ports:
+  - 7000
+bricks:
+  - arduino:web_ui
+  - ros2_bridge
+  # 官方物品检测 brick：会额外起一个 ei-obj-detection-runner 容器
+  # （Edge Impulse yolo-x-nano 模型，HTTP 1337，仅本机可访问）。
+  - arduino:object_detection

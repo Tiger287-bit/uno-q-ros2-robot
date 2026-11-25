@@ -1,0 +1,267 @@
+/* 本页布局与组件。顺序与页面从上到下一致：状态栏 → 主布局 → 卡片 → 遥控 →
+ * 遥测 → 通用标签与横幅。新增组件放对应小节末尾，不要插到别的节里。
+ *
+ * 依赖 tokens.css 的变量，所以 index.html 里必须先引 tokens.css。
+ */
+
+/* ============ 顶部状态栏 ============ */
+header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 12px 16px;
+  margin-bottom: 16px;
+}
+header .spacer { flex: 1; }
+
+/* 徽章：左侧圆点表示状态，.ok/.warn/.bad/.info 只改圆点与配色。
+   文字始终保留，不靠颜色单独传达信息（色弱可读）。 */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  background: var(--bg-subtle);
+}
+.badge::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--text-faint); }
+.badge.ok::before    { background: var(--success); }
+.badge.warn::before  { background: var(--warn); }
+.badge.bad::before   { background: var(--danger); }
+.badge.ok    { color: var(--success); border-color: rgba(22,163,74,.35); background: var(--success-subtle); }
+.badge.warn  { color: var(--warn);    border-color: rgba(217,119,6,.35); background: var(--warn-subtle); }
+.badge.bad   { color: var(--danger);  border-color: rgba(220,38,38,.35); background: var(--danger-subtle); }
+.badge.info  { color: var(--info);    border-color: rgba(37,99,235,.35);  background: var(--info-subtle); }
+
+/* ============ 主布局 ============ */
+main {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: 360px 1fr;
+  align-items: start;
+}
+@media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+}
+.card + .card { margin-top: 16px; }
+.card.locked { border-color: rgba(217,119,6,.55); box-shadow: 0 0 0 3px var(--warn-subtle); }
+
+/* ============ 摇杆 ============ */
+.stick-wrap { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 4px 0 2px; }
+
+/* 直径 168px 与 js/input.js 的 STICK_PX、球半径 KNOB_R=26 对应：
+   改尺寸要同时改那两处，否则球的可达半径与绘制半径对不上。 */
+.stick {
+  width: 168px; height: 168px;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  background:
+    radial-gradient(circle at 50% 50%, var(--bg-subtle) 0 62%, transparent 62%),
+    var(--surface);
+  position: relative;
+  touch-action: none;      /* 触摸拖动时不要滚动页面 */
+  cursor: grab;
+  transition: border-color var(--dur);
+}
+.stick:hover { border-color: var(--accent); }
+.stick.dragging { cursor: grabbing; border-color: var(--accent); }
+.stick.disabled { opacity: .45; cursor: not-allowed; }
+.stick .cross-h,
+.stick .cross-v {
+  position: absolute; background: var(--border);
+  pointer-events: none;
+}
+.stick .cross-h { left: 12%; right: 12%; top: 50%; height: 1px; }
+.stick .cross-v { top: 12%; bottom: 12%; left: 50%; width: 1px; }
+
+.stick .knob {
+  position: absolute;
+  left: 50%; top: 50%;
+  width: 52px; height: 52px;
+  margin: -26px 0 0 -26px;   /* 与 KNOB_R=26 一致 */
+  border-radius: 50%;
+  background: var(--accent-subtle);
+  border: 1px solid var(--accent);
+  box-shadow: var(--shadow-sm);
+  pointer-events: none;      /* 让 pointer 事件落在 .stick 上，拖动不中断 */
+}
+
+.cmd-row {
+  display: flex; gap: 18px; flex-wrap: wrap; justify-content: center;
+  font-family: var(--font-mono); font-size: 12px; color: var(--text-muted);
+}
+.cmd-row b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+.slider-row { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+.slider-row label { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
+.slider-row input[type="range"] { flex: 1 1 110px; min-width: 110px; accent-color: var(--accent); }
+.slider-row output {
+  font-family: var(--font-mono); font-size: 12px; min-width: 92px; text-align: right;
+  font-variant-numeric: tabular-nums;
+  /* 读数含"百分比 · cm/s · °/s"三段：不换行，但放不下时整段折到第二行，
+     否则 nowrap 会把卡片撑出横向溢出（390px 手机屏实测右半个读数被裁掉）。 */
+  flex: none; white-space: nowrap; margin-left: auto;
+}
+
+.keys { display: flex; gap: 4px; justify-content: center; margin-top: 10px; }
+.kbd {
+  font-family: var(--font-mono); font-size: 11px;
+  border: 1px solid var(--border-strong); border-bottom-width: 2px;
+  border-radius: 4px; padding: 1px 6px; color: var(--text-muted); background: var(--surface);
+}
+.kbd.on { background: var(--accent-subtle); border-color: var(--accent); color: var(--accent); }
+
+.btn-grid { display: grid; gap: 10px; }
+.btn-grid.split { grid-template-columns: 1fr 1fr; }
+
+/* ============ 遥测 ============ */
+.readout { display: flex; justify-content: space-between; align-items: baseline; padding: 5px 0; }
+.readout .k { color: var(--text-muted); font-size: 13px; }
+.readout .v { font-family: var(--font-mono); font-size: 14px; font-variant-numeric: tabular-nums; }
+.readout .v.big { font-size: 22px; font-weight: 600; }
+
+.bar { height: 7px; background: var(--bg-subtle); border-radius: 4px; overflow: hidden; margin: 4px 0 8px; }
+.bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width 120ms linear; }
+.bar.neg > i { background: var(--warn); }
+
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 480px) { .grid-2 { grid-template-columns: 1fr; } }
+
+.status-list { display: flex; flex-direction: column; gap: 8px; }
+.status-item { display: flex; justify-content: space-between; align-items: center; }
+.status-item .k { color: var(--text-muted); font-size: 13px; }
+.status-item .v { font-family: var(--font-mono); font-size: 13px; }
+
+/* 小标签（模式/IMU 状态），与徽章的区别：用于表格行内，无圆点 */
+.tag {
+  font-size: 12px; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--text-muted); background: var(--bg-subtle);
+}
+.tag.ok   { color: var(--success); border-color: rgba(22,163,74,.35);  background: var(--success-subtle); }
+.tag.warn { color: var(--warn);    border-color: rgba(217,119,6,.35);  background: var(--warn-subtle); }
+.tag.bad  { color: var(--danger);  border-color: rgba(220,38,38,.35);  background: var(--danger-subtle); }
+.tag.info { color: var(--info);    border-color: rgba(37,99,235,.35);  background: var(--info-subtle); }
+
+.hint { font-size: 12px; color: var(--text-faint); margin-top: 10px; line-height: 1.6; }
+.hint code { font-family: var(--font-mono); font-size: 11px; background: var(--bg-subtle); padding: 1px 4px; border-radius: 3px; }
+
+/* ============ 调试参数 ============ */
+.tune-status {
+  font-size: 12px; color: var(--text-muted);
+  padding: 3px 0 2px;
+}
+.tune-status.ok    { color: var(--success); }
+.tune-status.warn  { color: var(--warn); }
+.tune-status.dirty { color: var(--accent); }
+
+.tune-group { margin-top: 14px; }
+.tune-group-head {
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.tune-group-label { font-size: 13px; font-weight: 600; color: var(--text); }
+.tune-group-note { font-size: 11px; color: var(--text-faint); }
+
+.tune-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px 14px;
+}
+@media (max-width: 720px) { .tune-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 420px) { .tune-grid { grid-template-columns: 1fr; } }
+
+/* 标签可伸缩、输入框定宽、单位定宽：同一行的数字右沿对齐，扫读时不用来回找。 */
+.tune-item { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.tune-item .tune-k {
+  flex: 1 1 auto; min-width: 0;
+  color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tune-item input {
+  width: 74px; flex: none;
+  font: 12px/1.4 var(--font-mono); font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--text); background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 4px 6px;
+  -webkit-user-select: text; user-select: text;   /* body 禁用了选中，输入框要放开 */
+}
+.tune-item input:hover { border-color: var(--border-strong); }
+.tune-item input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-subtle); }
+.tune-item input.dirty { border-color: var(--accent); background: var(--accent-subtle); }
+.tune-item .tune-u { flex: none; width: 42px; color: var(--text-faint); font-size: 11px; }
+
+.tune-actions { margin-top: 16px; }
+
+/* ============ 横幅 ============ */
+.error-banner {
+  margin-top: 12px; padding: 10px 12px; border-radius: var(--radius-md);
+  background: var(--danger-subtle); border: 1px solid rgba(220,38,38,.35);
+  color: var(--danger); font-size: 13px; display: none;
+}
+.error-banner.show { display: block; }
+
+.lock-banner {
+  margin-top: 12px; padding: 9px 12px; border-radius: var(--radius-md);
+  background: var(--warn-subtle); border: 1px solid rgba(217,119,6,.35);
+  color: var(--warn); font-size: 13px; display: none;
+}
+.lock-banner.show { display: block; }
+
+/* ============ 地图与导航 ============ */
+/* 运行模式开关：分段按钮。与"点击设目标"那组分开一行，避免误认为同一类操作。 */
+.mode-row {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  margin-bottom: 10px;
+}
+.mode-label { font-size: 13px; color: var(--text-muted); }
+.mode-switch {
+  display: inline-flex; overflow: hidden;
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+}
+.mode-switch button {
+  border: 0; border-radius: 0; background: transparent;
+  padding: 6px 14px; min-height: 32px; font-size: 13px;
+}
+.mode-switch button + button { border-left: 1px solid var(--border); }
+.mode-switch button.active {
+  background: var(--accent-subtle); color: var(--accent); font-weight: 600;
+}
+.mode-switch button:disabled { opacity: 0.55; cursor: default; }
+
+.map-toolbar {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  margin-bottom: 10px;
+}
+/* 工具条上的按钮比主操作小一档：它们是模式切换，不是"按一下执行" */
+.map-toolbar button { padding: 6px 12px; min-height: 34px; font-size: 13px; }
+/* 模式选中态：与按钮 hover 同色系，但用底色区分"已经点开了" */
+.map-toolbar button.active {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+  color: var(--accent);
+  font-weight: 600;
+}
+.map-toolbar .tag { margin-left: auto; }
+
+.map-wrap {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle);
+  overflow: hidden;
+  /* 画布高度由 map.js 按地图比例算，这里只保证是块级且不溢出 */
+  line-height: 0;
+}
+.map-wrap canvas { display: block; width: 100%; height: auto; cursor: default; touch-action: manipulation; }

@@ -1,0 +1,54 @@
+# js_joy_node 参数（ROS 2 参数文件，节点名必须与 launch 里的 name 一致）。
+#
+# 本文件是手柄全部参数的唯一来源，launch 不再覆盖其中任何键。
+# 改完必须重启 App（这份 YAML 被拷进镜像，纯 Python 包重建约 30 s）。
+# 未在 YAML 中出现的键使用节点代码里的默认值（见 nodes/js_joy_node.py）。
+
+js_joy_node:
+  ros__parameters:
+    # 设备节点。容器按 devices: /dev/input 整体挂载，换端口时改这里。
+    # 这是唯一入口：launch 不再传 device，`ros2 param set` 也不管用（节点只在
+    # 构造时读一次，改参数不会重新打开设备）。临时试另一台设备用
+    #   ros2 run arduino_ros2_bringup js_joy_node --ros-args -p device:=/dev/input/js1
+    device: /dev/input/js0
+
+    # /joy 发布频率，Hz。
+    rate: 50.0
+
+    # 话题名。默认值与 common/topics.py 的契约一致，一般不要改；
+    # 多车共用同一 ROS 域联调时才需要区分。
+    cmd_topic: /cmd_vel_joy
+    joy_topic: /joy
+
+    # 轴映射：左摇杆上下 = 1，右摇杆左右 = 2（本车配套亚博手柄实测）。
+    axis_linear: 1
+    axis_angular: 2
+
+    # 按钮映射：右上肩键为使能键（按住才输出速度），R1 为加速键。
+    button_enable: 7
+    button_turbo: 8
+
+    # 满杆速度。线速度再高会进入轮子间歇打滑区。
+    #
+    # 两路遥控的"满舵"不是同一条刻度，换着用会有手感落差（实测 1.67 倍）：
+    #   手柄满杆        0.075  m/s · 1.20 rad/s   ← 网页线速度的 76%、角速度的 100%
+    #   手柄 + 加速键    0.0975 m/s · 1.20 rad/s   ← turbo 对角速度无效：轮速分解前
+    #                                             按 MAX_ANGULAR 截断（control.wheel_targets）
+    #   网页默认 60%    0.0593 m/s · 0.72 rad/s   ← 只有手柄满杆的六成
+    #   网页 100%       0.0989 m/s · 1.20 rad/s
+    # 网页是一个滑块同时缩放两轴，而这里的线速度被刻意压到 0.075，所以不存在某个
+    # 滑块位置能同时对上"手柄满杆"的两轴——这是有意为之，不是配错。
+    # 若坚持让手柄原地转向与网页默认一致，把 scale_angular 改成 0.72，代价是上限
+    # 一并降到 0.72，网页 100% 那一档再无对应。
+    scale_linear: 0.075
+    scale_angular: 1.20
+
+    # 按住加速键时的倍率。
+    turbo_factor: 1.30
+
+    # 摇杆中位死区，归一化量程内的比例。
+    deadband: 0.05
+
+    # 本手柄推上/推左为负值，取反后才符合 ROS 约定（前进为正、左转为正）。
+    invert_linear: true
+    invert_angular: true

@@ -1,0 +1,161 @@
+<?xml version='1.0' encoding='utf-8'?>
+<robot name="unoq">
+  <!-- Visual meshes and placements come from the saved SolidWorks assembly. Lengths use meters. -->
+  <!-- X points toward the camera bracket, Y left, Z up. base_link is centered on the drive axle. -->
+  <!-- laser_link is at the C1 scan plane and rotation axis. Confirm scan zero angle on the actual robot. -->
+  <material name="plate">
+    <color rgba="0.72 0.75 0.80 1" />
+  </material>
+  <material name="metal">
+    <color rgba="0.57 0.60 0.65 1" />
+  </material>
+  <material name="rubber">
+    <color rgba="0.095 0.11 0.14 1" />
+  </material>
+  <material name="board">
+    <color rgba="0.09 0.36 0.33 1" />
+  </material>
+  <material name="battery">
+    <color rgba="0.72 0.61 0.27 1" />
+  </material>
+  <material name="scanner">
+    <color rgba="0.19 0.21 0.24 1" />
+  </material>
+  <link name="base_footprint" />
+  <link name="base_link">
+    <visual name="chassis">
+      <geometry>
+        <mesh filename="package://unoq_description/meshes/chassis.stl" />
+      </geometry>
+      <material name="plate" />
+    </visual>
+    <visual name="upper_plate">
+      <geometry>
+        <mesh filename="package://unoq_description/meshes/upper_plate.stl" />
+      </geometry>
+      <material name="plate" />
+    </visual>
+    <visual name="lidar_mount">
+      <geometry>
+        <mesh filename="package://unoq_description/meshes/lidar_mount.stl" />
+      </geometry>
+      <material name="plate" />
+    </visual>
+    <visual name="camera_bracket">
+      <geometry>
+        <mesh filename="package://unoq_description/meshes/camera_bracket.stl" />
+      </geometry>
+      <material name="plate" />
+    </visual>
+    <visual name="battery">
+      <geometry>
+        <mesh filename="package://unoq_description/meshes/battery.stl" />
+      </geometry>
+      <material name="battery" />
+    </visual>
+    <visual name="uno_q">
+      <geometry>
+        <mesh filename="package://unoq_description/meshes/uno_q.stl" />
+      </geometry>
+      <material name="board" />
+    </visual>
+    <visual name="expansion_board">
+      <geometry>
+        <mesh filename="package://unoq_description/meshes/expansion_board.stl" />
+      </geometry>
+      <material name="board" />
+    </visual>
+    <visual name="left_motor">
+      <geometry>
+        <mesh filename="package://unoq_description/meshes/left_motor.stl" />
+      </geometry>
+      <material name="metal" />
+    </visual>
+    <visual name="right_motor">
+      <geometry>
+        <mesh filename="package://unoq_description/meshes/right_motor.stl" />
+      </geometry>
+      <material name="metal" />
+    </visual>
+  </link>
+  <link name="left_wheel_link">
+    <visual name="left_wheel">
+      <geometry>
+        <mesh filename="package://unoq_description/meshes/left_wheel.stl" />
+      </geometry>
+      <material name="rubber" />
+    </visual>
+    <visual name="left_hub">
+      <geometry>
+        <mesh filename="package://unoq_description/meshes/left_hub.stl" />
+      </geometry>
+      <material name="metal" />
+    </visual>
+  </link>
+  <link name="right_wheel_link">
+    <visual name="right_wheel">
+      <geometry>
+        <mesh filename="package://unoq_description/meshes/right_wheel.stl" />
+      </geometry>
+      <material name="rubber" />
+    </visual>
+    <visual name="right_hub">
+      <geometry>
+        <mesh filename="package://unoq_description/meshes/right_hub.stl" />
+      </geometry>
+      <material name="metal" />
+    </visual>
+  </link>
+  <link name="caster_link">
+    <visual name="caster">
+      <geometry>
+        <mesh filename="package://unoq_description/meshes/caster.stl" />
+      </geometry>
+      <material name="metal" />
+    </visual>
+  </link>
+  <link name="laser_link">
+    <visual name="rplidar_c1">
+      <geometry>
+        <mesh filename="package://unoq_description/meshes/rplidar_c1.stl" />
+      </geometry>
+      <material name="scanner" />
+    </visual>
+  </link>
+  <joint name="base_joint" type="fixed">
+    <parent link="base_footprint" />
+    <child link="base_link" />
+    <origin xyz="0 0 0.03316983169" rpy="0 0 0" />
+  </joint>
+  <joint name="left_wheel_joint" type="continuous">
+    <parent link="base_link" />
+    <child link="left_wheel_link" />
+    <origin xyz="0 0.07528 0" rpy="0 0 0" />
+    <axis xyz="0 1 0" />
+  </joint>
+  <joint name="right_wheel_joint" type="continuous">
+    <parent link="base_link" />
+    <child link="right_wheel_link" />
+    <origin xyz="0 -0.07528 0" rpy="0 0 0" />
+    <axis xyz="0 1 0" />
+  </joint>
+  <joint name="caster_joint" type="fixed">
+    <parent link="base_link" />
+    <child link="caster_link" />
+    <origin xyz="0.06914 0 -0.0145" rpy="0 0 0" />
+  </joint>
+  <joint name="laser_joint" type="fixed">
+    <parent link="base_link" />
+    <child link="laser_link" />
+    <origin xyz="0.03504 0 0.09118615674" rpy="0 0 0" />
+  </joint>
+  <!-- IMU 装在主板上，与车体固连。/imu 的 frame_id 指向这里，否则订阅端
+       拿 imu_link 去查 TF 会直接失败。位置先与 base_link 重合：二维里程计只
+       用航向，IMU 的安装偏移不影响结果；将来做多传感器融合再按实物标定。 -->
+  <link name="imu_link" />
+  <joint name="imu_joint" type="fixed">
+    <parent link="base_link" />
+    <child link="imu_link" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </joint>
+</robot>

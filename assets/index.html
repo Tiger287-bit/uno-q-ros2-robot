@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>UNO Q 控制台</title>
+
+<!-- 内联图标：App 不提供 /favicon.ico，缺了浏览器会在控制台留一条 404。
+     用 data URI 省掉一次请求，也不用多存一个二进制文件。 -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%234F46E5'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%23fff'/%3E%3C/svg%3E">
+
+<!-- 样式：tokens 只放设计令牌与基础元素，app 放本页布局与组件。
+     页面结构是静态的，跨文件改动时按"令牌 → 组件"顺序找即可。 -->
+<link rel="stylesheet" href="/css/tokens.css">
+<link rel="stylesheet" href="/css/app.css">
+<!-- 摄像头面板单独一份：比例、全屏、深色底只服务于这一块，
+     混进 app.css 会和通用卡片/按钮规则搅在一起。 -->
+<link rel="stylesheet" href="/css/camera.css">
+</head>
+<body>
+
+<!-- ==================== 顶部状态栏 ==================== -->
+<header>
+  <h1>UNO Q 控制台</h1>
+  <span id="linkBadge" class="badge">ROS 2 未连接</span>
+  <span id="mcuBadge" class="badge">MCU 未知</span>
+  <span id="rateBadge" class="badge">— Hz</span>
+  <span class="spacer"></span>
+  <span id="webBadge" class="badge">网页指令未连接</span>
+  <span id="connBadge" class="badge">页面未连接</span>
+</header>
+
+<main>
+  <!-- ==================== 左侧：遥控 ==================== -->
+  <section>
+    <div class="card" id="stickCard">
+      <h2>遥控（摇杆 / 键盘）</h2>
+
+      <div class="stick-wrap">
+        <div class="stick" id="stick">
+          <div class="cross-h"></div>
+          <div class="cross-v"></div>
+          <div class="knob" id="knob"></div>
+        </div>
+        <div class="cmd-row">
+          <span>线速度 <b id="cmdLinear">0.000</b></span>
+          <span>角速度 <b id="cmdAngular">0.000</b></span>
+        </div>
+      </div>
+
+      <div class="slider-row">
+        <label for="speedScale">速度</label>
+        <input type="range" id="speedScale" min="10" max="100" step="5" value="60">
+        <output id="speedScaleOut">60%</output>
+      </div>
+
+      <div class="keys">
+        <span class="kbd" data-key="up">W</span>
+        <span class="kbd" data-key="left">A</span>
+        <span class="kbd" data-key="down">S</span>
+        <span class="kbd" data-key="right">D</span>
+      </div>
+
+      <p class="hint">
+        拖动摇杆，或按住 <code>W A S D</code> / 方向键。松开即停车并交还控制权给手柄。
+        滑块按百分比同时缩放线速度与角速度，上限由后端下发，绝对数值看右侧读数
+        （改轮径或换电机后会自动跟着变）。手柄不走这个滑块：满杆的线速度只有这里的
+        76%（角速度才是 100%）。
+      </p>
+
+      <div class="lock-banner" id="lockBanner">
+        已急停锁定：网页与手柄输入都被忽略。再次点击「解除锁定」才能恢复。
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>控制指令</h2>
+      <div class="btn-grid">
+        <button id="stop" class="danger">急停</button>
+      </div>
+      <div class="btn-grid split" style="margin-top:10px;">
+        <button id="reset">复位故障</button>
+        <button id="calibrate">校准航向</button>
+      </div>
+      <div class="error-banner" id="errorBanner"></div>
+      <p class="hint">
+        急停会立即下发停车并锁住遥控输入；复位清除锁存故障；校准需小车静止、IMU 就绪。
+      </p>
+    </div>
+
+    <!-- 摄像头：MJPEG 长连接，状态走 /api/camera/status。
+         断流时浏览器不一定报错，所以"还在不在更新"由帧龄判断（见 camera.js）。 -->
+    <div class="card camera-card" id="cameraCard">
+      <div class="camera-head">
+        <h2>摄像头</h2>
+        <span id="cameraStatus" class="tag warn">未连接</span>
+        <button id="cameraToggle">暂停</button>
+        <button id="cameraExpand">放大</button>
+      </div>
+      <div class="camera-frame">
+        <img id="cameraFeed" alt="摄像头画面">
+        <!-- 检测框画在独立画布上：视频 15 fps、检测 3~5 fps，
+             烧进画面会让框在两次检测之间粘在旧位置。 -->
+        <canvas id="detectCanvas" class="camera-overlay"></canvas>
+      </div>
+      <p class="camera-detail" id="cameraDetail">—</p>
+      <div class="detect-row">
+        <span id="detectStatus" class="tag warn">检测未就绪</span>
+        <span id="detectDetail" class="camera-detail">—</span>
+      </div>
+      <div class="detect-list" id="detectList"></div>
+      <p class="hint">
+        车头 UVC 摄像头（/dev/video0），画面已按安装方向顺时针旋转 90°。
+        双击画面可放大或还原；暂停会真正断开视频连接，省电也省带宽。
+      </p>
+    </div>
+  </section>
+
+  <!-- ==================== 右侧：遥测 ==================== -->
+  <section>
+    <!-- 地图与导航：数据来自容器内 nav_bridge（地图/位姿/路径/状态一条 JSON），
+         命令回同一条链路。画布尺寸在 map.js 里按容器宽度与地图比例算。 -->
+    <div class="card" id="mapCard">
+      <h2>地图与导航</h2>
+      <!-- 运行模式：两套栈常驻，容器里的 mode_manager 负责激活/停用。
+           切换要几秒，中间会禁用按钮，避免连点。 -->
+      <div class="mode-row">
+        <span class="mode-label">运行模式</span>
+        <div class="mode-switch" role="group" aria-label="运行模式">
+          <button id="modeNav">导航</button>
+          <button id="modeSlam">建图</button>
+        </div>
+        <span id="modeLabel" class="tag warn">模式未知</span>
+      </div>
+      <div class="map-toolbar">
+        <button id="navMode">点击设目标</button>
+        <button id="poseMode">重设初始位姿</button>
+        <button id="navCancel" class="danger">取消导航</button>
+        <span id="navStatus" class="tag">未定位</span>
+      </div>
+      <div class="map-wrap">
+        <canvas id="mapCanvas" width="600" height="320"></canvas>
+      </div>
+      <p class="hint">
+        <b>导航模式</b>（默认）用已保存的地图定位并规划：点「点击设目标」后在地图上点一下，
+        Nav2 就开过去；<b>按住拖动</b>可以顺带指定到点时的车头朝向。导航中推摇杆或按键盘
+        会立刻接管并取消目标。定位丢了（图标变空心）就点「重设初始位姿」，<b>按住</b>车所在
+        位置拖出车头方向再松开——状态条会显示「定位已确认」或「定位未确认」。
+      </p>
+      <p class="hint">
+        <b>建图模式</b>切到 slam_toolbox：地图<b>沿用本次运行已有的那一份</b>继续叠加，
+        不会清空（Jazzy 的 deactivate/activate 只停发布，不丢图）。导航按钮会暂时不可用。
+        建完先 <code>save_map</code> 存成新文件，否则切回导航读的还是启动参数
+        <code>map_yaml</code> 指定的那张（默认 room_20261122）。切回导航后需要点一次
+        「重设初始位姿」——两张地图之间没有坐标关系。切换期间两个模式都不可操作。
+      </p>
+    </div>
+
+    <div class="card">
+      <h2>驱动状态</h2>
+      <div class="grid-2">
+        <div>
+          <div class="readout"><span class="k">右轮 M1 目标</span><span class="v" id="m1Target">—</span></div>
+          <div class="readout"><span class="k">实测</span><span class="v big" id="m1Speed">—</span></div>
+          <div class="bar"><i id="m1Bar"></i></div>
+          <div class="readout"><span class="k">PWM</span><span class="v" id="m1Pwm">—</span></div>
+        </div>
+        <div>
+          <div class="readout"><span class="k">左轮 M2 目标</span><span class="v" id="m2Target">—</span></div>
+          <div class="readout"><span class="k">实测</span><span class="v big" id="m2Speed">—</span></div>
+          <div class="bar"><i id="m2Bar"></i></div>
+          <div class="readout"><span class="k">PWM</span><span class="v" id="m2Pwm">—</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>姿态与电源</h2>
+      <div class="grid-2">
+        <div>
+          <div class="readout"><span class="k">航向</span><span class="v" id="yaw">—</span></div>
+          <div class="readout"><span class="k">角速度</span><span class="v" id="rate">—</span></div>
+        </div>
+        <div>
+          <div class="readout"><span class="k">电池电压</span><span class="v big" id="voltage">—</span></div>
+          <div class="readout"><span class="k">IMU 状态</span><span id="imuState" class="tag">—</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>控制器诊断</h2>
+      <div class="status-list">
+        <div class="status-item"><span class="k">模式</span><span id="mode" class="tag">—</span></div>
+        <div class="status-item"><span class="k">原因</span><span class="v" id="reason">—</span></div>
+        <div class="status-item"><span class="k">阶段</span><span class="v" id="phase">—</span></div>
+        <div class="status-item"><span class="k">驱动使能</span><span class="v" id="awake">—</span></div>
+        <div class="status-item"><span class="k">nFAULT</span><span class="v" id="nfault">—</span></div>
+        <div class="status-item"><span class="k">车收到指令</span><span class="v" id="carCmd">—</span></div>
+        <div class="status-item"><span class="k">指令来源</span><span class="v" id="cmdSource">—</span></div>
+        <div class="status-item"><span class="k">指令受理</span><span class="v" id="ack">—</span></div>
+        <div class="status-item"><span class="k">保向修正</span><span class="v" id="assist">—</span></div>
+      </div>
+    </div>
+
+    <!-- 调试参数：数值由 /api/tune 下发，面板结构在 tune.js 里按分组生成。
+         默认值就是上板标定值，改完点「应用改动」立即写进 MCU 运行期变量。 -->
+    <div class="card" id="tuneCard">
+      <h2>调试参数</h2>
+      <div class="tune-status" id="tuneStatus">读取中…</div>
+      <div id="tuneGroups"></div>
+      <div class="btn-grid split tune-actions">
+        <button id="tuneApply">应用改动</button>
+        <button id="tuneReset">恢复默认</button>
+      </div>
+      <p class="hint">
+        改动立即写进 MCU 的运行期变量，不用停车或重启：轮速环、前馈、起转和
+        航向环都在一次下发里生效。斜坡与增益在下一拍控制周期就按新值计算。
+        <br>
+        前馈模型为 <code>占空比 = 截距 + |目标|/斜率</code>，斜率越小前馈越高。
+        航向 Kp 1.0 约等于 43.4 cps/°，修正上限压在 300 cps 时更大的 Kp 会饱和。
+      </p>
+    </div>
+  </section>
+</main>
+
+<!-- socket.io 客户端随 App 一起发布在 vendor/ 下（v4.7.5, MIT）。
+     不能写 /socket.io/socket.io.js：本版 App Lab 的 fastapi_socketio 只挂
+     了事件端点，没有开静态客户端，那个路径返回 400，页面里 io 会一直是
+     undefined，整条实时链路静默失效。升级客户端见 docs/FRONTEND.md。
+     它是普通脚本（非模块），先执行并提供全局 io，业务模块随后加载。 -->
+<script src="/vendor/socket.io.min.js"></script>
+<script type="module" src="/js/main.js"></script>
+</body>
+</html>

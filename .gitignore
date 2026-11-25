@@ -1,0 +1,20 @@
+# App Lab 运行缓存
+.cache/
+
+# Python 编译缓存
+__pycache__/
+*.pyc
+
+# 本机前端回归脚手架的临时产物（_web_test 只是开发工具，不上板）
+_web_test/.tmp/
+_web_test/.chrome-profile/
+
+# 运行时产物
+__pycache__/
+*.pyc
+.cache/
+build/
+log/
+*.bin
+*.elf
+trace/*.csv

@@ -1,0 +1,86 @@
+# SLAM Toolbox 参数（异步建图模式）。
+#
+# 为什么用异步（online_async）而不是同步：
+#   同步模式要求按固定周期拿到扫描并即时处理完，处理时间一旦抖动就会丢帧。
+#   这块板子同时在跑 rosbridge + Foxglove + 控制环，CPU 余量不大，
+#   异步模式把建图放在独立回调里，丢一两帧也不影响地图接续。
+#
+# 只写"必须改"的项，其余用 slam_toolbox 自己的默认值。
+#
+# 早先有一个"启动后只出一帧地图、之后彻底静默"的悬案，追到最后是两件
+# 独立的事叠加，跟 solver / tf_buffer / 线程栈都没有关系：
+#   1. /map 根本不是每帧扫描发的 —— 它由独立线程按 map_update_interval
+#      定时重发，默认 10 s。低速行驶 10 s 只走 1 m，Foxglove 里看到的
+#      就是"地图和当前扫描对不上"（实测 142 个端点只有 14 个落图）。
+#   2. 纯旋转时扫描被 shouldProcessScan 丢掉（见文件末尾的说明）。
+# 判断"有没有在匹配"要看 /pose（每成功处理一帧发一次），不是看 /map。
+#
+# 坐标系链路（本文件只补最上面一段）：
+#   map --(slam_toolbox)--> odom --(wheel_odom)--> base_footprint
+#        --(URDF 静态)--> base_link --> laser_link
+#
+# 扫描节奏：/scan 约 2.0~2.6 Hz，而处理一帧要 0.3~0.5 s，所以隔帧处理。
+
+slam_toolbox:
+  ros__parameters:
+    # ---- 坐标系与话题 ----
+    odom_frame: odom
+    map_frame: map
+    base_frame: base_footprint       # 地面投影点，z 恒为 0
+    # 走中继话题：直接订阅 rosbridge 广播的 /scan 时，slam 只在启动时
+    # 收到一帧、之后彻底静默（见 scan_relay.py 的说明）。
+    scan_topic: /scan_slam
+    mode: mapping                    # mapping=建图；localizing=纯定位
+
+    # 实车必须 false。launch 里也会显式传一次，这里写死是为了
+    # 单独 `ros2 run slam_toolbox async_slam_toolbox_node` 时也不会用错。
+    use_sim_time: false
+
+    # ---- 地图 ----
+    resolution: 0.05                 # 5 cm/格
+    max_laser_range: 12.0            # 与 /scan 的 range_max 一致
+
+    # ---- 处理节奏 ----
+    # 喂 2.6 Hz 会积压（启动日志里出现过 queue is full），隔帧 + 0.5 s 间隔。
+    minimum_time_interval: 0.5
+    throttle_scans: 2
+
+    # /map 的重发周期（秒）。默认 10 s：地图不是随扫描更新的，而是由一个
+    # 独立线程按这个间隔调 updateMap() 全量重算一次。
+    # 0.1 m/s 下 10 s 走 1 m，地图会明显落后当前扫描，看起来像"建图没生效"。
+    # 合成测试：12 s 原地旋转，10 s 间隔只出 1 帧地图，1.0 s 间隔出 11 帧。
+    #
+    # 代价是每 1 s 调一次 getOccupancyGrid()（按地图范围全量重算），地图
+    # 变大后 CPU 会上升，到几十米见方再考虑放宽。
+    # 注意：这个值只在 publishVisualizations 线程启动时读一次，
+    # ros2 param set 不生效，改完必须重启节点。
+    map_update_interval: 1.0
+
+    # 还有一个容易踩的点：updateMap() 开头会检查 sst_->get_subscription_count()，
+    # 没有订阅者时直接返回、连栅格都不算。/map 是 transient_local，晚连上来的
+    # 订阅者能收到最后一帧，但"没人订阅时地图不刷新"这件事得知道 ——
+    # 排查时先确认确实有人在订阅（Foxglove、MapSaver 都算）。
+
+    # ---- 建节点门槛 ----
+    # 必须很小。这台车在场地里最多 0.1 m/s，而静止时 odom 仍以
+    # 0.17°/s 缓慢漂移：门槛 0.05 意味着站着不动要等 17 s 才建一个节点，
+    # 地图会长时间停在启动那一帧，和当前扫描对不上（实测 142 个扫描端点
+    # 只有 14 个落在图上）。0.01 折合 1 cm / 0.6°，静止约 3.5 s 收敛一次，
+    # 行驶时经 throttle_scans 限流后约 1 节点/7 cm。
+    minimum_travel_distance: 0.01
+    minimum_travel_heading: 0.01
+
+    # 原地转向必须打开这一项，否则上面那个 heading 门槛等于不存在。
+    #
+    # slam_toolbox 2.8.5 的 shouldProcessScan 有两条分支：
+    #   false（默认）  dist2 < 0.8*min_dist2 就 return false —— 只看平移，
+    #                  朝向完全不参与判断（源码注释是 min heading is
+    #                  occasionally checked in the mapper）。
+    #   true           dist2 < min_dist2 **且** heading_diff < min_rotation
+    #                  才丢，朝向变化够大时即使没位移也照常处理。
+    # 所以默认值下，原地打转的扫描全被丢掉：/map 冻在启动那一帧，
+    # map→odom 也不再修正。0.01 rad ≈ 0.57°，转 1° 就能过。
+    #
+    # 注意 min_dist2 / min_rotation 在 shouldProcessScan 里是函数内 static，
+    # 只在第一次调用时求值 —— 改完必须重启节点（ros2 param set 无效）。
+    check_min_dist_and_heading_precisely: true

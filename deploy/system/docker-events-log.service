@@ -1,0 +1,28 @@
+[Unit]
+# 记录容器生命周期事件，用于事后判断"App 为什么自己停了"。
+#
+# 为什么需要：现场反馈"跑一段时间后 App 变成 stopped，只能手动再开"，但
+# `arduino-app-cli` 的日志里没有任何 stop 记录，容器又被下一次 start 重建，
+# 旧的退出码随之消失。docker events 会把 die/oom/start/stop 连同 exitCode
+# 一起留在 journal 里，下次再发生直接：
+#   journalctl -u docker-events-log -n 50 --no-pager
+# 就能看到是 OOM（action=oom / exit=137）、异常退出（exit=1）还是被主动停
+# （action=stop）。
+Description=Docker container events logger (post-mortem)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+# 只收容器生命周期事件：healthcheck 的 exec_create/exec_die 每 2 s 两条，
+# 全收会把真正的 die 淹掉。
+ExecStart=/usr/bin/docker events \
+  --filter event=create --filter event=start --filter event=die \
+  --filter event=stop --filter event=kill --filter event=oom \
+  --filter event=restart --filter event=destroy \
+  --format "{{.Time}} {{.Action}} {{.Actor.Attributes.name}} exit={{.Actor.Attributes.exitCode}}"
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

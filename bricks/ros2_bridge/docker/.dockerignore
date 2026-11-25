@@ -1,0 +1,7 @@
+# 构建上下文只应包含源码：构建产物与缓存不要进镜像层（会让每次构建都失效）。
+ros_ws/build
+ros_ws/install
+ros_ws/log
+**/__pycache__
+**/*.pyc
+**/*.pyo

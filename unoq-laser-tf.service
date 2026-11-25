@@ -1,0 +1,13 @@
+[Unit]
+Description=UNO Q laser static TF (base_link -> laser_link)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStart=/home/arduino/ArduinoApps/uno-q-ros2-demo/tf_loop.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,332 @@
+# Nav2 导航参数（Jazzy，最小节点集）。
+#
+# 设计取舍都写在这里，改参数前先读对应那一段：
+#   - 车很小很慢：实测满占空比约 0.08 m/s，角速度上限 1.2 rad/s，
+#     所以速度、加速度限值都按"不到 0.1 m/s"的量级给，否则控制器
+#     每拍都要求加速度超过电机能力，跟踪会一直滞后。
+#   - 外形用 10 cm 半径的圆，而不是 URDF 网格：底盘 0.15 x 0.19 m 左右，
+#     圆比矩形保守，5 cm 格子的房间里够用，也不会因为网格缺碰撞体而漏判。
+#   - 全局代价地图把未知当障碍（track_unknown_space: true、规划器
+#     allow_unknown: false）：地图只覆盖走过的地方，墙外是未知，当成可通行
+#     会规划出穿墙的路径。局部代价地图相反（false）—— 它在 odom 系里滚动，
+#     视野边缘天然是未知，当障碍会让车一直"看到"一堵莫须有的墙。
+#
+# 与固件/里程计的接口：
+#   /scan_slam  —— 中继后的扫描（sensor data QoS）。AMCL 与局部代价地图都用它，
+#                  不用 /scan：rosbridge 发的 /scan 是 RELIABLE+TRANSIENT_LOCAL，
+#                  与 BEST_EFFORT 订阅端配合有"只收到第一帧"的旧账。
+#   /odom       —— wheel_odom 的 5 Hz 里程计，Nav2 只读 TF，不用这个话题做控制。
+#   map->odom 由 AMCL 独占发布；建图（slam_toolbox）与导航只能有一边 active，
+#   运行时的切换由 mode_manager 通过生命周期服务完成（见 launch/bringup）。
+
+map_server:
+  ros__parameters:
+    use_sim_time: false
+    yaml_filename: /opt/ros_ws/maps/room_20261122.yaml
+    topic_name: map
+    frame_id: map
+
+amcl:
+  ros__parameters:
+    use_sim_time: false
+    # 里程计噪声模型。轮式里程计 5 Hz、IMU 定航向，转向比平移可信，
+    # 所以旋转项的 alpha 给小一点。
+    alpha1: 0.2
+    alpha2: 0.2
+    alpha3: 0.15
+    alpha4: 0.1
+    alpha5: 0.2
+    base_frame_id: base_footprint
+    global_frame_id: map
+    odom_frame_id: odom
+    scan_topic: /scan_slam
+    map_topic: map
+    # 12 m 量程的 C1 雷达，但室内有效回波多在 4 m 内；60 束抽样足够，
+    # 800 个粒子在 A53 上单核占用可以接受。
+    laser_max_range: 12.0
+    laser_min_range: -1.0
+    laser_model_type: likelihood_field
+    laser_likelihood_max_dist: 1.5
+    max_beams: 60
+    max_particles: 800
+    min_particles: 300
+    pf_err: 0.05
+    pf_z: 0.99
+    resample_interval: 1
+    robot_model_type: nav2_amcl::DifferentialMotionModel
+    # 静止时 odom 仍以 0.17°/s 漂移，更新门槛给小一点，让 AMCL 持续纠正；
+    # 太大会积累到几十厘米才动一次。
+    update_min_d: 0.02
+    update_min_a: 0.05
+    # TF 往前预支 1 s。雷达 2 Hz、AMCL 也就 2 Hz 更新，预支太短会让
+    # 代价地图偶尔查不到 map->odom。
+    transform_tolerance: 1.0
+    tf_broadcast: true
+    # 开机就用固定起点（建图时 map 原点就是车的出发点）。页面上的
+    # "重设初始位姿" 会发 /initialpose，覆盖这个值。
+    set_initial_pose: true
+    always_reset_initial_pose: false
+    initial_pose:
+      x: 0.0
+      y: 0.0
+      z: 0.0
+      yaw: 0.0
+    z_hit: 0.5
+    z_rand: 0.5
+    z_max: 0.05
+    z_short: 0.05
+    sigma_hit: 0.2
+    lambda_short: 0.1
+    do_beamskip: false
+    beam_skip_distance: 0.5
+    beam_skip_threshold: 0.3
+    beam_skip_error_threshold: 0.9
+    save_pose_rate: 0.5
+    recovery_alpha_slow: 0.0
+    recovery_alpha_fast: 0.0
+
+# ---- 代价地图：两个独立节点，不是 planner/controller 的子参数 ----
+#
+# Nav2 里 local_costmap / global_costmap 是独立的 Costmap2DROS 节点，
+# 由 controller_server / planner_server 在 on_configure 时创建，节点名分别是
+# local_costmap / global_costmap，命名空间同名，所以参数路径是
+#     /local_costmap/local_costmap/ros__parameters
+# 写成 controller_server.ros__parameters.local_costmap 不会报错，也永远读不到：
+# 节点按自己的全名取参数，父节点下的那一坨只是躺在参数服务器里没人问。
+# 症状是局部代价地图用默认值（5x5 m、订阅 /scan），避障配置全部失效。
+#
+# 另一处坑：width/height 声明为 int，写 3.0 会在 configure 时报类型不匹配。
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      use_sim_time: false
+      update_frequency: 5.0
+      publish_frequency: 2.0
+      global_frame: odom
+      robot_base_frame: base_footprint
+      robot_radius: 0.10
+      resolution: 0.05
+      rolling_window: true
+      width: 3            # 单位是格子数，int；写 3.0 会报类型不匹配
+      height: 3
+      track_unknown_space: false
+      plugins: ["obstacle_layer", "inflation_layer"]
+      obstacle_layer:
+        plugin: nav2_costmap_2d::ObstacleLayer
+        enabled: true
+        observation_sources: scan
+        scan:
+          topic: /scan_slam
+          data_type: "LaserScan"
+          expected_update_rate: 1.0
+          max_obstacle_height: 2.0
+          clearing: true
+          marking: true
+          raytrace_max_range: 3.0
+          raytrace_min_range: 0.0
+          obstacle_max_range: 2.5
+          obstacle_min_range: 0.0
+      inflation_layer:
+        plugin: nav2_costmap_2d::InflationLayer
+        inflation_radius: 0.20
+        cost_scaling_factor: 3.0
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      use_sim_time: false
+      update_frequency: 1.0
+      publish_frequency: 0.5
+      global_frame: map
+      robot_base_frame: base_footprint
+      robot_radius: 0.10
+      resolution: 0.05
+      track_unknown_space: true
+      rolling_window: false
+      plugins: ["static_layer", "inflation_layer"]
+      static_layer:
+        plugin: nav2_costmap_2d::StaticLayer
+        map_subscribe_transient_local: true
+      inflation_layer:
+        plugin: nav2_costmap_2d::InflationLayer
+        # 半径 10 cm 的车留 12 cm 余量：太贴墙时雷达看不到的角落会刮到。
+        inflation_radius: 0.22
+        cost_scaling_factor: 3.0
+
+planner_server:
+  ros__parameters:
+    use_sim_time: false
+    expected_planner_frequency: 1.0
+    planner_plugins: ["GridBased"]
+    GridBased:
+      # 类名用 C++ 的 :: 分隔（ROS 2 插件）。写成 ROS 1 的 "/" 会在
+      # configure 阶段 FATAL：Declared types are nav2_navfn_planner::NavfnPlanner
+      plugin: nav2_navfn_planner::NavfnPlanner
+      tolerance: 0.15
+      # 用 Dijkstra 而不是 A*。实测这张图（193x102、48% 未知、障碍周围
+      # 大片高代价格）上 A* 对任何目标都返回 "Failed to create plan"，
+      # 而同一时刻从车格做 BFS 能找到上万格可达区域 —— 是 NavFn 的 A*
+      # 启发式在这个代价格局下发散，不是地图不可达。Dijkstra 在这个规模
+      # （两万格）上单次几毫秒，没有性能理由用 A*。
+      use_astar: false
+      allow_unknown: false
+controller_server:
+  ros__parameters:
+    use_sim_time: false
+    controller_frequency: 10.0
+    min_x_velocity_threshold: 0.001
+    min_y_velocity_threshold: 0.5
+    min_theta_velocity_threshold: 0.001
+    failure_tolerance: 0.3
+    # Jazzy 用复数列表；Humble 时代的单数参数已经废弃。
+    progress_checker_plugins: ["progress_checker"]
+    goal_checker_plugins: ["general_goal_checker"]
+    controller_plugins: ["FollowPath"]
+    progress_checker:
+      plugin: nav2_controller::PoseProgressChecker
+      required_movement_radius: 0.05
+      required_movement_angle: 0.15
+      movement_time_allowance: 10.0
+    general_goal_checker:
+      stateful: true
+      plugin: nav2_controller::SimpleGoalChecker
+      # 注意：这里以前同时存在两组 xy/yaw_goal_tolerance（重复键），YAML 后写
+      # 的会覆盖先写的，所以前面那组一直没生效——改容差必须先删掉重复项。
+      # 位置进到 5 cm 内即判到达。
+      xy_goal_tolerance: 0.05
+      # 朝向判定恢复。之前放到 180° 是因为原地转不动会让车一直绕圈；转不动的
+      # 真因（导航指令短暂掉零 → App 下发停车 → 增量式 PID 累加器被清零）已经
+      # 在 App 侧修掉了，这里可以要求车头对齐到目标朝向。
+      yaw_goal_tolerance: 0.30
+    FollowPath:
+      plugin: nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController
+      # 0.05 m/s 时速度缩放后的前视距离只有 0.075 m，被 min_lookahead 卡在 0.12。
+      # 0.12 m 前视 + AMCL 静止 6 cm 的定位抖动 = 单次 27° 的转向指令，直线上
+      # 表现为车头左右摆（"没有障碍物却一直转弯"）。前视拉到 0.30 后同样的
+      # 6 cm 误差只折算 11°，而 0.30 m 的切弯半径对 3 m 见方的场地仍够用。
+      # 0.05 m/s 已经是这台车在地面上的可持续上限（实测 1618 cps 时 PWM 200/255，
+      # 再高就顶满占空比、进度检查容易误判为没进展）。速度不抬，只改前视。
+      # 0.037 m/s（1200 cps）是底盘当前能稳定维持的上限：增量式速度环实测
+      # 稳态 ±3%、纹波 87/79 cps、PWM 99~135（上限 220）。往上到 2400 cps
+      # 纹波会飙到 2342，在 220 上限来回振，navigation 会判"没进展"。
+      # 想再快必须先解决机械阻力（万向轮/蹭轮）。
+      desired_linear_vel: 0.037
+      lookahead_dist: 0.35
+      min_lookahead_dist: 0.30
+      max_lookahead_dist: 0.55
+      lookahead_time: 1.5
+      use_velocity_scaled_lookahead_dist: true
+      min_approach_linear_velocity: 0.02
+      approach_velocity_scaling_dist: 0.25
+      # 加速度按电机实际能力给：固件斜坡 6000 cps/s ≈ 0.185 m/s²，
+      # 这里留一半余量，避免每拍都被限幅。
+      max_allowed_time_to_collision_up_to_carrot: 1.5
+      use_regulated_linear_velocity_scaling: true
+      use_cost_regulated_linear_velocity_scaling: false
+      regulated_linear_scaling_min_radius: 0.35
+      regulated_linear_scaling_min_speed: 0.02
+      # 原地转向交给控制器：车能原地转，比画弧线省地方。
+      # 原地转向重新打开：之前关掉是因为"转不动"，而转不动的真因是导航指令
+      # 短暂掉零、App 每几十毫秒就下发一次停车，把增量式 PID 的累加器清零，
+      # 占空比永远攒不到起转阈值。App 侧加了 0.45 s 指令保持之后问题消失。
+      # 打开后车才能"先转到正确朝向再走"，并在到点后把朝向摆正。
+      use_rotate_to_heading: true
+      # 原地转向是电流最大的动作（两侧轮胎横向刮擦），0.6 rad/s 一带载就锁死。
+      # 降到 0.3 rad/s，转向时间翻倍，但不会把驱动顶进保护。
+      rotate_to_heading_angular_vel: 0.3
+      # 0.5 rad（28.6°）太容易触发：航向抖 0.1 rad + 路径起步角度就能越过门槛，
+      # 于是车在直线上频繁"停一下、原地转、再走"。1.0 rad（57°）只在大角度
+      # 换向时才原地转，直线段交给 RPP 连续跟踪。
+      rotate_to_heading_min_angle: 1.0
+      max_angular_accel: 2.5
+      transform_tolerance: 0.3
+      allow_reversing: false
+      max_robot_pose_search_dist: 10.0
+      interpolation_resolution: 0.05
+behavior_server:
+  ros__parameters:
+    use_sim_time: false
+    # Jazzy 的参数名带 local_/global_ 前缀；Humble 时代的 costmap_topic 已废弃，
+    # 写了也不会生效，会退回默认值。
+    local_costmap_topic: local_costmap/costmap_raw
+    global_costmap_topic: global_costmap/costmap_raw
+    local_footprint_topic: local_costmap/published_footprint
+    global_footprint_topic: global_costmap/published_footprint
+    cycle_frequency: 10.0
+    behavior_plugins: ["spin", "backup", "drive_on_heading", "wait"]
+    spin:
+      plugin: nav2_behaviors::Spin
+    backup:
+      plugin: nav2_behaviors::BackUp
+    drive_on_heading:
+      plugin: nav2_behaviors::DriveOnHeading
+    wait:
+      plugin: nav2_behaviors::Wait
+    local_frame: odom
+    global_frame: map
+    robot_base_frame: base_footprint
+    transform_tolerance: 0.2
+    simulate_ahead_time: 2.0
+    # 恢复动作（spin / backup / wait）在失败时会连做几轮，而原地转是整个
+    # 流程里电流最大的动作。0.8 rad/s 一带载就把占空比顶到失效区，车反而
+    # 彻底不动了。降到 0.3 能转得动，恢复才有意义。
+    max_rotational_vel: 0.3
+    min_rotational_vel: 0.15
+    rotational_acc_lim: 0.5
+
+bt_navigator:
+  ros__parameters:
+    use_sim_time: false
+    global_frame: map
+    robot_base_frame: base_footprint
+    odom_topic: /odom
+    bt_loop_duration: 10
+    # 动作服务响应超时（毫秒）。默认 20 ms 是给桌面级 CPU 定的：BT 发出
+    # follow_path 之后只等 20 ms，收不到 goal handle 就整棵树立马 FAILURE。
+    # 实测这块板子（4×A53，导航栈 + 视觉推理同时跑）controller_server 已经在
+    # 32 ms 内受理了目标、cmd_vel 都发出去了，BT 仍在 1 s 后报
+    # "Timed out while waiting for action server to acknowledge goal request"，
+    # 目标被判 status=6 中止，表现就是"点了目标车动一下就不动了"。
+    # 500 ms 足够覆盖调度抖动，又不会让真故障等太久。
+    default_server_timeout: 500
+    # plugin_lib_names 刻意不设：Jazzy 的内建 BT 插件是自动注册的，这个参数
+    # 只用于追加自定义插件。把所有 lib*_bt_node.so 列进来会重复注册，
+    # configure 阶段 FATAL: ID [AreErrorCodesPresent] already registered。
+    # BT 里 FollowPath / ComputePathToPose 的错误码，缺了会有一行
+    # "Error_code parameters were not set" 的告警。
+    error_code_names:
+      - compute_path_error_code
+      - follow_path_error_code
+    # 等动作服务就绪的上限，单位毫秒。
+    # 等动作服务就绪的上限，单位毫秒。1 s 在这块板子上太短：BT 的 action client
+    # 与 controller_server 的 action server 走 DDS 发现，机器满负荷时握手会被
+    # 拖到秒级，超时后整条目标直接 abort（日志正是同一句 "Timed out while
+    # waiting for action server..."，实测刚好在发目标后 1.02 s 触发）。
+    # 8 s 只影响"服务真的没起来"时的报错延迟，不影响正常路径。
+    wait_for_service_timeout: 8000
+    action_server_result_timeout: 900.0
+    navigators: ["navigate_to_pose"]
+    navigate_to_pose:
+      plugin: nav2_bt_navigator::NavigateToPoseNavigator
+
+lifecycle_manager_navigation:
+  ros__parameters:
+    use_sim_time: false
+    # bringup 里会覆盖成 false，由 mode_manager 决定什么时候 startup：
+    # 两套栈都在同一个容器里常驻，切到建图时必须先把导航组 shutdown，
+    # 否则 slam_toolbox 与 AMCL 会同时往 map->odom 上写。
+    # 单独跑 `ros2 launch ... nav.launch.py` 时用这里的 true 直接起来。
+    autostart: true
+    # 顺序有意义：map_server 先起（AMCL 与全局代价地图都要等地图），
+    # bt_navigator 最后（它要连四个 server 的动作接口）。
+    node_names:
+      - map_server
+      # amcl 默认不启动（固定起始位姿，map->odom 由 static_transform_publisher
+      # 发布）。要切回 AMCL：nav.launch.py 传 use_amcl:=true，并把这一行恢复。
+      - planner_server
+      - controller_server
+      - behavior_server
+      - bt_navigator
+    # 板子上没有 bond 心跳的必要，关掉省一次超时等待。
+    bond_timeout: 0.0
+    attempt_respawn_reconnection: false

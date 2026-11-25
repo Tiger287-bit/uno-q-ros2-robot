@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>arduino_ros2_bringup</name>
+  <version>0.2.0</version>
+  <description>
+    Arduino UNO Q 的 ROS 2 启动包：rosbridge、手柄遥控、速度仲裁，
+    以及后续传感器/导航等功能的统一挂载点。每个节点是一个独立可执行，
+    由 launch/ 下的启动文件按需组合。
+  </description>
+  <maintainer email="noreply@arduino.cc">UNO Q ROS 2 Demo</maintainer>
+  <license>Apache-2.0</license>
+
+  <!-- 节点运行时依赖：只写真正 import 到的包。 -->
+  <depend>rclpy</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+
+  <!-- launch 依赖：rosbridge_server 由容器镜像 apt 安装。 -->
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>rosbridge_server</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

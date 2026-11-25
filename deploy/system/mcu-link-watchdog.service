@@ -1,0 +1,21 @@
+[Unit]
+# MCU 串口链路看门狗。详见 deploy/system/mcu-link-watchdog.sh 的说明。
+#
+# 单独成一个服务而不是塞进 App：链路挂掉时 App 自己也调不动，只有 Linux 侧
+# 能重启 router / 容器，所以必须由 systemd 托管。
+Description=MCU link watchdog (restart router+app when telemetry dies)
+After=docker.service arduino-router.service arduino-app-cli.service
+Wants=arduino-router.service
+# 别因为 App 还没起来就反复失败退出：脚本自己会一直循环。
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/mcu-link-watchdog.sh
+Restart=always
+RestartSec=5
+# 重启 router/app 需要 root；脚本内部用 sudo -u arduino 保证 App 文件属主正确。
+User=root
+
+[Install]
+WantedBy=multi-user.target

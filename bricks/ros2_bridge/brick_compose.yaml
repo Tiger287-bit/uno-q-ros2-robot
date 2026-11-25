@@ -1,0 +1,59 @@
+# ROS 2 容器定义。
+# 写法对齐板上官方 brick 的 compose
+# （/var/lib/arduino-app-cli/assets/<版本>/compose/arduino/*/brick_compose.yaml）。
+#
+# 镜像用 build 现场构建，不放预置 tag：App Lab 不支持私有仓库，
+# 写死本地 tag 换台机器就失效。首次构建需拉取 ros:jazzy-ros-base-noble
+# 并安装 rosbridge_server，约 1.5 GB 空闲磁盘、5~10 分钟。
+
+services:
+  ros2:
+    build:
+      context: ./docker
+      dockerfile: Dockerfile
+    # 构建产物的本地标签，便于 docker images 里辨认与手工清理。
+    image: ros2_bridge:local
+
+    # 官方每个 brick 都配日志轮转；板子只有 9.8 GB eMMC，
+    # 不加限制的话容器日志会一直长到写满根分区。
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+    ports:
+      - "8765:8765"
+
+    # 地图保存在 Brick 的 ROS 工作目录，供容器重建后继续使用。
+    volumes:
+      - ./docker/ros_ws/maps:/opt/ros_ws/maps
+    
+    devices:
+      - /dev/input
+
+    # tini 接管 PID 1。ros2 launch 自己会回收子进程，但它异常退出后容器里就没有
+    # reaper 了；有 init 才能保证信号转发与僵尸回收不依赖 launch 的实现细节。
+    init: true
+
+    environment:
+      ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
+      ROS_LOG_DIR: /tmp/unoq-ros-log
+
+    # 用 bash 的 /dev/tcp 连一下 9090，判断的仍是"端口能否建立 TCP"。
+    # 原来用 python3 -c：解释器冷启动加 import 实测 175 ms，每 2 s 一次等于
+    # 常驻烧掉约 9% 的一核、一天 fork 四万三千次进程；bash 内建版本 7 ms。
+    # 裸 TCP 连接不触发 rosbridge 的日志（tornado 在 websocket 握手成功后才记
+    # Client connected），所以不是为了刷日志才改 —— 那一点实测不存在。
+    #
+    # 用 CMD 而非 CMD-SHELL：后者多经一层 /bin/sh（本镜像是 dash）。dash 对
+    # 单条命令会 exec 替换，实测 pid 相同、不额外 fork 进程，但多一次 execve，
+    # 实测 11 ms vs 7 ms。exec 失败时 bash 自身就以非零退出，不需要 || exit 1。
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9090"]
+      interval: 2s
+      # 探测本身实测 7 ms，timeout 只需覆盖调度抖动。原来写 3 s 比 interval
+      # 还长，等于没有约束：真超过 2 s 只可能是 connect() 在内核里挂住，
+      # 而那种情况下一次探测超时也要靠下一拍（2 s 后）来判断，3 s 救不回来。
+      timeout: 1s
+      retries: 30
